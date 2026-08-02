@@ -1,0 +1,31 @@
+[versions]
+javaToolchain = "25"
+springBoot    = "4.1.0"
+junit         = "5.11.4"
+jqwik         = "1.9.1"
+assertj       = "3.26.3"
+archunit      = "1.4.2"
+spotless      = "7.0.3"
+wiremock      = "3.9.2"
+
+[libraries]
+# Spring Boot BOM — use as platform() in modules that need Spring version management.
+spring-boot-bom          = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "springBoot" }
+# Starters have no version; the BOM above manages them.
+spring-boot-starter-web       = { module = "org.springframework.boot:spring-boot-starter-web" }
+spring-boot-starter-test      = { module = "org.springframework.boot:spring-boot-starter-test" }
+spring-boot-starter-websocket = { module = "org.springframework.boot:spring-boot-starter-websocket" }
+junit-bom      = { module = "org.junit:junit-bom",                             version.ref = "junit"    }
+junit-jupiter  = { module = "org.junit.jupiter:junit-jupiter"                                           }
+jqwik          = { module = "net.jqwik:jqwik",                                 version.ref = "jqwik"    }
+assertj        = { module = "org.assertj:assertj-core",                         version.ref = "assertj"  }
+archunit-junit = { module = "com.tngtech.archunit:archunit-junit5",             version.ref = "archunit" }
+# WireMock 3.x: Maven groupId moved to org.wiremock; the com.github.tomakehurst.wiremock.* Java
+# package namespace stayed backward-compatible. -standalone bundles its own Jetty server (the
+# bare "wiremock" artifact needs a separately-managed HttpServerFactory extension).
+wiremock       = { module = "org.wiremock:wiremock-standalone",                 version.ref = "wiremock" }
+
+[plugins]
+spring-boot    = { id = "org.springframework.boot",        version.ref = "springBoot" }
+# Spotless version is consumed by buildSrc; kept here for single-source-of-truth visibility.
+spotless       = { id = "com.diffplug.spotless",           version.ref = "spotless"   }

@@ -1,0 +1,3 @@
+app.viglide.examples.emarsi.EmaCrossoverRsiStrategyProvider
+app.viglide.examples.meanrev.MeanReversionRsiBbStrategyProvider
+app.viglide.examples.macdtrend.TrendFollowMacdAtrStrategyProvider

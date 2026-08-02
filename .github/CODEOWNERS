@@ -1,0 +1,3 @@
+# The maintainer on everything, initially (PLAN-018 R-4.3). Per-directory ownership can be split
+# out here later if contributors arrive; until then this is one line, not an OWNERS tree.
+* @AlexOreshkevich

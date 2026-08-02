@@ -1,0 +1,29 @@
+.gradle/
+**/build/
+.DS_Store
+*.iml
+.idea/
+.vscode/
+.obsidian/
+.claude/settings.local.json
+# Bulk research corpus — 2.6 GB, reproducible from Binance public endpoints (see PLAN-018 R-4.2).
+# Anchored to root: an unanchored "data/" also matches app/viglide/core/data, a real source package.
+# "/data/*" (not "/data/") so git still traverses the directory — a negation pattern below can't
+# re-include a file whose parent directory is itself excluded (a well-known gitignore limitation).
+/data/*
+# The checksum manifest is the one exception — ~50 KB, committed so a stranger can verify a
+# re-download reproduces the corpus byte-for-byte (scripts/download_historical_data.py --from-manifest).
+!/data/MANIFEST.tsv
+# Local run artifacts.
+/live-runs/
+# PLAN-018 R-3: winners.json is now tracked, redacted and repo-relative, under params/ (CLAUDE.md
+# §8 amended) — the private repo's history/audit mechanism, not a Secret Manager stand-in anymore.
+# A stray root-level or elsewhere copy must still never be committed by accident.
+/winners.json
+/winners*.json
+# PLAN-013 Task H: cumulative calibration trial registry -- not secret, but a local research
+# artifact like winners.json, not a build output; kept out of version control until there's a
+# principled reason to publish trial-count history.
+research-trials.jsonl
+# SENSITIVE — never commit (see PLAN-001 §9 Hygiene): rotate & remove this file.
+Backup-codes-*.txt
