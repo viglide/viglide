@@ -6,6 +6,7 @@
 .vscode/
 .obsidian/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 # Bulk research corpus — 2.6 GB, reproducible from Binance public endpoints (see PLAN-018 R-4.2).
 # Anchored to root: an unanchored "data/" also matches app/viglide/core/data, a real source package.
 # "/data/*" (not "/data/") so git still traverses the directory — a negation pattern below can't
