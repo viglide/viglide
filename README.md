@@ -1,5 +1,8 @@
 # Viglide
 
+[![build](https://github.com/viglide/viglide/actions/workflows/ci.yml/badge.svg)](https://github.com/viglide/viglide/actions/workflows/ci.yml)
+[![deploy](https://github.com/viglide/viglide/actions/workflows/publish.yml/badge.svg)](https://github.com/viglide/viglide/actions/workflows/publish.yml)
+
 Transparent, hybrid cryptocurrency trading platform.
 
 A fast, deterministic Java statistical engine generates trade signals. An optional, asynchronous AI debate layer adds context for ambiguous or high-stakes cases. A mandatory Risk Manager is the final gate before execution. Every decision is explainable and surfaced to the user.
