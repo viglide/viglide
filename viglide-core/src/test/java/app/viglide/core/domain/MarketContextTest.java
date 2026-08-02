@@ -155,4 +155,84 @@ class MarketContextTest {
                     Optional.empty(),
                     null));
   }
+
+  // ── PLAN-015 Task C: premiumIndexHistory ─────────────────────────────────────────────────────
+
+  @Test
+  void premiumIndexHistory_defaultsEmptyOnEveryBackwardCompatibleConstructor() {
+    List<Candle> candles = List.of(candle("2024-01-01T00:00:00Z"));
+    assertThat(new MarketContext("BTCUSDT", CandleInterval.ONE_HOUR, candles).premiumIndexHistory())
+        .isEmpty();
+    assertThat(
+            new MarketContext("BTCUSDT", CandleInterval.ONE_HOUR, candles, List.of())
+                .premiumIndexHistory())
+        .isEmpty();
+    assertThat(
+            new MarketContext(
+                    "BTCUSDT", CandleInterval.ONE_HOUR, candles, List.of(), Optional.empty())
+                .premiumIndexHistory())
+        .isEmpty();
+    assertThat(
+            new MarketContext(
+                    "BTCUSDT",
+                    CandleInterval.ONE_HOUR,
+                    candles,
+                    List.of(),
+                    Optional.empty(),
+                    Optional.empty())
+                .premiumIndexHistory())
+        .isEmpty();
+  }
+
+  @Test
+  void premiumIndexHistory_explicitValueRoundTrips() {
+    List<PremiumIndexEvent> events =
+        List.of(
+            new PremiumIndexEvent(Instant.parse("2024-01-01T00:00:00Z"), new BigDecimal("0.0005")));
+    MarketContext ctx =
+        new MarketContext(
+            "BTCUSDT",
+            CandleInterval.ONE_HOUR,
+            List.of(candle("2024-01-01T00:00:00Z")),
+            List.of(),
+            events,
+            Optional.empty(),
+            Optional.empty());
+    assertThat(ctx.premiumIndexHistory()).isEqualTo(events);
+  }
+
+  @Test
+  void premiumIndexHistoryListIsDefensivelyCopied() {
+    ArrayList<PremiumIndexEvent> mutable =
+        new ArrayList<>(
+            List.of(
+                new PremiumIndexEvent(
+                    Instant.parse("2024-01-01T00:00:00Z"), new BigDecimal("0.0005"))));
+    MarketContext ctx =
+        new MarketContext(
+            "BTCUSDT",
+            CandleInterval.ONE_HOUR,
+            List.of(candle("2024-01-01T00:00:00Z")),
+            List.of(),
+            mutable,
+            Optional.empty(),
+            Optional.empty());
+    mutable.add(new PremiumIndexEvent(Instant.parse("2024-01-01T01:00:00Z"), BigDecimal.ZERO));
+    assertThat(ctx.premiumIndexHistory()).hasSize(1);
+  }
+
+  @Test
+  void rejectsNullPremiumIndexHistory() {
+    assertThatNullPointerException()
+        .isThrownBy(
+            () ->
+                new MarketContext(
+                    "BTCUSDT",
+                    CandleInterval.ONE_HOUR,
+                    List.of(candle("2024-01-01T00:00:00Z")),
+                    List.of(),
+                    null,
+                    Optional.empty(),
+                    Optional.empty()));
+  }
 }

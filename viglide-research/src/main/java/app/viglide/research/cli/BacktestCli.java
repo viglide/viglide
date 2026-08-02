@@ -14,10 +14,12 @@ import app.viglide.core.backtest.SharpeStats;
 import app.viglide.core.backtest.Trade;
 import app.viglide.core.data.CsvFundingReader;
 import app.viglide.core.data.CsvKlineReader;
+import app.viglide.core.data.CsvPremiumIndexReader;
 import app.viglide.core.domain.Candle;
 import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.ExchangeFilters;
 import app.viglide.core.domain.FundingEvent;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.params.CliArgs;
 import app.viglide.core.params.JsonReader;
@@ -73,6 +75,11 @@ import java.util.stream.Stream;
  * (e.g. 1m bars covering the same period as {@code --dataset}) used only to resolve SL/TP ordering
  * (OHLCV strategies) or re-check the liquidation guard at sub-bar granularity (fundingarb v2) —
  * never consumed by the strategy itself (D9-2). Omit for the original, decision-bar-only behaviour.
+ *
+ * <p>{@code --premium-index-dataset=<path>} (PLAN-015 Task C, {@code funding-model=v2} only): an
+ * optional premium-index kline CSV used to build a nowcast series alongside {@code
+ * --funding-dataset}'s realised settlements — see {@link app.viglide.core.domain.MarketContext}'s
+ * {@code premiumIndexHistory} Javadoc. Omit for the original, realised-history-only behaviour.
  *
  * <p>{@code --min-notional=<bd> --qty-step=<bd> --price-tick=<bd>} (PLAN-010 Task D3): the
  * backtest/live-parity knob — all three or none. When set, every RM-gated evaluation carries the
@@ -150,6 +157,18 @@ public final class BacktestCli {
       }
     }
 
+    // PLAN-015 Task C: premium-index nowcast series, distinct from realised `funding` above (see
+    // MarketContext.premiumIndexHistory's Javadoc). Absent by default -- omitting it leaves every
+    // pre-existing run byte-identical.
+    String premiumIndexDataset = args.get("premium-index-dataset");
+    List<PremiumIndexEvent> premiumIndex = List.of();
+    if (premiumIndexDataset != null && !premiumIndexDataset.isBlank()) {
+      try (Stream<PremiumIndexEvent> s =
+          CsvPremiumIndexReader.stream(Paths.get(premiumIndexDataset))) {
+        premiumIndex = s.toList();
+      }
+    }
+
     // Materialised once (not just streamed) so the buy-and-hold benchmark (C.5) can walk the same
     // candles the strategy saw, after whichever harness has consumed them.
     List<Candle> candles;
@@ -177,7 +196,16 @@ public final class BacktestCli {
       }
       result =
           FundingArbHarnessV2.run(
-              strategy, candles, spotCandles, funding, symbol, interval, cfg, rm, subBarCandles);
+              strategy,
+              candles,
+              spotCandles,
+              funding,
+              premiumIndex,
+              symbol,
+              interval,
+              cfg,
+              rm,
+              subBarCandles);
     } else if (fundingAware) {
       result = FundingArbHarness.run(strategy, candles, funding, symbol, interval, cfg, rm);
     } else {

@@ -13,9 +13,11 @@ import app.viglide.core.backtest.SharpeStats;
 import app.viglide.core.backtest.Trade;
 import app.viglide.core.data.CsvFundingReader;
 import app.viglide.core.data.CsvKlineReader;
+import app.viglide.core.data.CsvPremiumIndexReader;
 import app.viglide.core.domain.Candle;
 import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.FundingEvent;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.params.CliArgs;
 import app.viglide.core.params.JsonReader;
 import app.viglide.core.params.JsonWriter;
@@ -78,6 +80,9 @@ import java.util.stream.Stream;
  *       ONE_MINUTE}): loads each pair's {@code {PAIR}_1m_{label}.csv} as the liquidation guard's
  *       finer-grained series (PLAN-009 Task B2) — a pair missing that file keeps close-only timing
  *       for that pair alone (warning, not a skip).
+ *   <li>Premium-index nowcast data (PLAN-015 Task C, {@code --funding-model=v2} only): loaded
+ *       automatically from {@code {PAIR}_premiumidx_{intervalTag}_{label}.csv} when present, no
+ *       flag needed — optional and non-fatal per pair (falls back to realised-history-only).
  *   <li>{@code --datasets-dir=data} (default {@code data})
  *   <li>{@code --winners-template={PAIR}_fundingarb_{Y}} (default {@code {PAIR}_<strategy>_{Y}});
  *       {@code {Y}} is the training-year key into winners.json. Defaults to the PLAN-008 1-year-
@@ -170,6 +175,7 @@ public final class PortfolioCli {
     Map<String, List<Candle>> subBarBySymbol = new LinkedHashMap<>();
     Map<String, TradingStrategy> strategiesBySymbol = new LinkedHashMap<>();
     Map<String, List<FundingEvent>> fundingBySymbol = new LinkedHashMap<>();
+    Map<String, List<PremiumIndexEvent>> premiumIndexBySymbol = new LinkedHashMap<>();
     List<String> included = new ArrayList<>();
     List<String> skipped = new ArrayList<>();
 
@@ -240,6 +246,17 @@ public final class PortfolioCli {
         try (Stream<FundingEvent> s = CsvFundingReader.stream(fundingPath)) {
           funding = s.toList();
         }
+
+        // PLAN-015 Task C: premium-index nowcast series, optional and non-fatal -- a pair missing
+        // it just falls back to realised-history-only for that pair (see FundingCarryNowcast-
+        // Strategy's own fallback), never excludes the pair the way a missing funding file does.
+        Path premiumIndexPath =
+            datasetsDir.resolve(pair + "_premiumidx_" + intervalTag + "_" + label + ".csv");
+        if (Files.exists(premiumIndexPath)) {
+          try (Stream<PremiumIndexEvent> s = CsvPremiumIndexReader.stream(premiumIndexPath)) {
+            premiumIndexBySymbol.put(pair, s.toList());
+          }
+        }
       }
 
       candlesBySymbol.put(pair, candles);
@@ -265,6 +282,7 @@ public final class PortfolioCli {
                 candlesBySymbol,
                 spotBySymbol,
                 fundingBySymbol,
+                premiumIndexBySymbol,
                 strategiesBySymbol,
                 subBarBySymbol,
                 interval,

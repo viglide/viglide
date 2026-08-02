@@ -5,6 +5,7 @@ import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.Direction;
 import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.MarketContext;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.risk.CircuitBreaker;
@@ -91,6 +92,7 @@ public final class FundingArbHarnessV2 {
       List<Candle> perpCandles,
       List<Candle> spotCandles,
       List<FundingEvent> fundingEvents,
+      List<PremiumIndexEvent> premiumIndexEvents,
       String symbol,
       CandleInterval interval,
       BacktestConfig cfg,
@@ -100,6 +102,7 @@ public final class FundingArbHarnessV2 {
     Objects.requireNonNull(perpCandles, "perpCandles");
     Objects.requireNonNull(spotCandles, "spotCandles");
     Objects.requireNonNull(fundingEvents, "fundingEvents");
+    Objects.requireNonNull(premiumIndexEvents, "premiumIndexEvents");
     Objects.requireNonNull(symbol, "symbol");
     Objects.requireNonNull(interval, "interval");
     Objects.requireNonNull(cfg, "cfg");
@@ -125,8 +128,10 @@ public final class FundingArbHarnessV2 {
     List<Refusal> refusals = new ArrayList<>();
     Deque<Candle> window = new ArrayDeque<>(cfg.warmupBars());
     Deque<FundingEvent> fundingWindow = new ArrayDeque<>();
+    Deque<PremiumIndexEvent> premiumIndexWindow = new ArrayDeque<>();
 
     int fundingIdx = 0;
+    int premiumIndexIdx = 0;
     int subBarIdx = 0;
     int barIndex = 0;
     long evaluations = 0;
@@ -169,6 +174,15 @@ public final class FundingArbHarnessV2 {
           cash = cash.add(funding);
           netFundingAccrued = netFundingAccrued.add(funding);
         }
+      }
+
+      // 1a. Premium-index nowcast window: drain samples up to this bar's openTime, same
+      // monotonic-cursor no-lookahead pattern as the funding drain above — this is windowing only,
+      // it never touches cash (see MarketContext.premiumIndexHistory's Javadoc for why the two
+      // channels must stay separate).
+      while (premiumIndexIdx < premiumIndexEvents.size()
+          && !premiumIndexEvents.get(premiumIndexIdx).time().isAfter(perp.openTime())) {
+        premiumIndexWindow.addLast(premiumIndexEvents.get(premiumIndexIdx++));
       }
 
       // 1b. Slice perp sub-bars (if any) covering this bar's window — same monotonic-cursor
@@ -276,6 +290,7 @@ public final class FundingArbHarnessV2 {
                 interval,
                 new ArrayList<>(window),
                 new ArrayList<>(fundingWindow),
+                new ArrayList<>(premiumIndexWindow),
                 Optional.empty(),
                 cfg.exchangeFilters());
         Optional<TechnicalSignal> sig = strategy.evaluate(ctx);
@@ -402,6 +417,7 @@ public final class FundingArbHarnessV2 {
     diag.put("signals", signals);
     diag.put("bars", (long) equityCurve.size());
     diag.put("fundingEvents", (long) fundingEvents.size());
+    diag.put("premiumIndexEvents", (long) premiumIndexEvents.size());
     diag.put("barsSkippedNoSpotMatch", barsSkippedNoSpotMatch);
     diag.put("liquidations", liquidations);
     diag.put("model", "funding-arb-v2");
@@ -425,6 +441,35 @@ public final class FundingArbHarnessV2 {
         equityCurve,
         diag,
         refusals);
+  }
+
+  /**
+   * Backward-compatible overload predating {@link #run(TradingStrategy, List, List, List, List,
+   * String, CandleInterval, BacktestConfig, Optional, List)}'s premium-index parameter (PLAN-015
+   * Task C). Defaults it to empty — every caller that hasn't opted into the nowcast series keeps
+   * seeing an identical, unaffected run.
+   */
+  public static BacktestResult run(
+      TradingStrategy strategy,
+      List<Candle> perpCandles,
+      List<Candle> spotCandles,
+      List<FundingEvent> fundingEvents,
+      String symbol,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      Optional<RiskManagerPort> rm,
+      List<Candle> perpSubBarCandles) {
+    return run(
+        strategy,
+        perpCandles,
+        spotCandles,
+        fundingEvents,
+        List.of(),
+        symbol,
+        interval,
+        cfg,
+        rm,
+        perpSubBarCandles);
   }
 
   /** Overload with an RM but no perp sub-bars (original close-only liquidation-guard timing). */

@@ -382,6 +382,78 @@ class FundingArbHarnessV2Test {
         .isEqualTo(Duration.ofHours(50));
   }
 
+  // ── PLAN-015 Task C: premium-index nowcast window is time-gated (no lookahead) ─────────────────
+
+  @Test
+  void premiumIndexWindow_onlyExposesEventsNotAfterCurrentBarOpenTime() {
+    int warmupBars = 3;
+    List<Candle> perp = flatCandles(6, new BigDecimal("100"));
+    List<Candle> spot = flatCandles(6, new BigDecimal("100"));
+
+    // First evaluation is bar index 2 (openTime T0+2h); second is bar index 3 (T0+3h).
+    List<app.viglide.core.domain.PremiumIndexEvent> premiumIndex =
+        List.of(
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
+
+    RecordingStrategy strategy = new RecordingStrategy();
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"),
+            FeeModel.taker(),
+            warmupBars,
+            new BigDecimal("0.5"),
+            null,
+            null,
+            8760);
+
+    FundingArbHarnessV2.run(
+        strategy,
+        perp,
+        spot,
+        List.of(),
+        premiumIndex,
+        SYMBOL,
+        CandleInterval.ONE_HOUR,
+        cfg,
+        Optional.empty(),
+        List.of());
+
+    assertThat(strategy.seenPremiumIndexHistories).hasSizeGreaterThanOrEqualTo(2);
+    // Eval 0 (asOf = T0+2h): the T0+3h sample must not be visible yet.
+    assertThat(strategy.seenPremiumIndexHistories.get(0))
+        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .containsExactly(T0.plus(Duration.ofHours(1)), T0.plus(Duration.ofHours(2)));
+    // Eval 1 (asOf = T0+3h): now visible.
+    assertThat(strategy.seenPremiumIndexHistories.get(1))
+        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .containsExactly(
+            T0.plus(Duration.ofHours(1)),
+            T0.plus(Duration.ofHours(2)),
+            T0.plus(Duration.ofHours(3)));
+  }
+
+  /** Records each evaluation's {@code premiumIndexHistory} snapshot; never signals. */
+  private static final class RecordingStrategy implements TradingStrategy {
+    final List<List<app.viglide.core.domain.PremiumIndexEvent>> seenPremiumIndexHistories =
+        new ArrayList<>();
+
+    @Override
+    public Optional<TechnicalSignal> evaluate(MarketContext ctx) {
+      seenPremiumIndexHistories.add(List.copyOf(ctx.premiumIndexHistory()));
+      return Optional.empty();
+    }
+
+    @Override
+    public StrategyMetadata metadata() {
+      return new StrategyMetadata("Recording", "0.0.0", "test double", StrategyKind.FUNDING_AWARE);
+    }
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
   private static List<Candle> flatCandles(int n, BigDecimal price) {

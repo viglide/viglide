@@ -5,6 +5,7 @@ import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.Direction;
 import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.MarketContext;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.risk.CircuitBreaker;
@@ -90,6 +91,7 @@ public final class PortfolioFundingArbHarnessV2 {
       Map<String, List<Candle>> perpCandlesBySymbol,
       Map<String, List<Candle>> spotCandlesBySymbol,
       Map<String, List<FundingEvent>> fundingBySymbol,
+      Map<String, List<PremiumIndexEvent>> premiumIndexBySymbol,
       Map<String, TradingStrategy> strategiesBySymbol,
       Map<String, List<Candle>> perpSubBarCandlesBySymbol,
       CandleInterval interval,
@@ -98,6 +100,7 @@ public final class PortfolioFundingArbHarnessV2 {
     Objects.requireNonNull(perpCandlesBySymbol, "perpCandlesBySymbol");
     Objects.requireNonNull(spotCandlesBySymbol, "spotCandlesBySymbol");
     Objects.requireNonNull(fundingBySymbol, "fundingBySymbol");
+    Objects.requireNonNull(premiumIndexBySymbol, "premiumIndexBySymbol");
     Objects.requireNonNull(strategiesBySymbol, "strategiesBySymbol");
     Objects.requireNonNull(perpSubBarCandlesBySymbol, "perpSubBarCandlesBySymbol");
     Objects.requireNonNull(interval, "interval");
@@ -132,7 +135,9 @@ public final class PortfolioFundingArbHarnessV2 {
 
     Map<String, Deque<Candle>> windows = new HashMap<>();
     Map<String, Deque<FundingEvent>> fundingWindows = new HashMap<>();
+    Map<String, Deque<PremiumIndexEvent>> premiumIndexWindows = new HashMap<>();
     Map<String, Integer> fundingIdx = new HashMap<>();
+    Map<String, Integer> premiumIndexIdx = new HashMap<>();
     Map<String, Integer> subBarIdx = new HashMap<>();
     Map<String, OpenPosition> positions = new HashMap<>();
     Map<String, BigDecimal> lastNotional = new HashMap<>();
@@ -145,7 +150,9 @@ public final class PortfolioFundingArbHarnessV2 {
     for (String symbol : symbols) {
       windows.put(symbol, new ArrayDeque<>());
       fundingWindows.put(symbol, new ArrayDeque<>());
+      premiumIndexWindows.put(symbol, new ArrayDeque<>());
       fundingIdx.put(symbol, 0);
+      premiumIndexIdx.put(symbol, 0);
       subBarIdx.put(symbol, 0);
       tradesBySymbol.put(symbol, new ArrayList<>());
       barsSkipped.put(symbol, 0L);
@@ -211,6 +218,18 @@ public final class PortfolioFundingArbHarnessV2 {
           }
         }
         fundingIdx.put(symbol, fIdx);
+
+        // Premium-index nowcast window for this symbol: same monotonic-cursor no-lookahead drain
+        // as the funding accrual above, windowing only — never touches cash (PLAN-015 Task C; see
+        // MarketContext.premiumIndexHistory's Javadoc for why the two channels stay separate).
+        List<PremiumIndexEvent> premiumIndexList =
+            premiumIndexBySymbol.getOrDefault(symbol, List.of());
+        int pIdx = premiumIndexIdx.get(symbol);
+        while (pIdx < premiumIndexList.size()
+            && !premiumIndexList.get(pIdx).time().isAfter(perp.openTime())) {
+          premiumIndexWindows.get(symbol).addLast(premiumIndexList.get(pIdx++));
+        }
+        premiumIndexIdx.put(symbol, pIdx);
 
         // Slice this symbol's perp sub-bars (if any) covering this bar's window.
         List<Candle> perpSubBarCandles = perpSubBarCandlesBySymbol.getOrDefault(symbol, List.of());
@@ -296,7 +315,10 @@ public final class PortfolioFundingArbHarnessV2 {
                 symbol,
                 interval,
                 new ArrayList<>(window),
-                new ArrayList<>(fundingWindows.get(symbol)));
+                new ArrayList<>(fundingWindows.get(symbol)),
+                new ArrayList<>(premiumIndexWindows.get(symbol)),
+                Optional.empty(),
+                Optional.empty());
         var sig = strategiesBySymbol.get(symbol).evaluate(ctx);
         if (sig.isEmpty()) {
           barIndexBySymbol.merge(symbol, 1, Integer::sum);
@@ -482,10 +504,13 @@ public final class PortfolioFundingArbHarnessV2 {
     diag.put("symbols", symbols.size());
     diag.put("liquidations", liquidations);
     diag.put("totalFeesPaid", totalFeesPaid);
+    long totalPremiumIndexEvents = 0;
     for (String symbol : symbols) {
       diag.put("barsSkipped." + symbol, barsSkipped.get(symbol));
       diag.put("trades." + symbol, (long) tradesBySymbol.get(symbol).size());
+      totalPremiumIndexEvents += premiumIndexBySymbol.getOrDefault(symbol, List.of()).size();
     }
+    diag.put("premiumIndexEvents", totalPremiumIndexEvents);
 
     return new BacktestResult(
         cfg.startingCash(),
@@ -501,7 +526,33 @@ public final class PortfolioFundingArbHarnessV2 {
         refusals);
   }
 
-  /** Overload without sub-bar realism (original close-only liquidation-guard timing). */
+  /**
+   * Backward-compatible overload predating this class's premium-index parameter (PLAN-015 Task C).
+   * Defaults it to empty for every symbol — a caller that hasn't opted into the nowcast series
+   * keeps seeing an identical, unaffected run.
+   */
+  public static BacktestResult run(
+      Map<String, List<Candle>> perpCandlesBySymbol,
+      Map<String, List<Candle>> spotCandlesBySymbol,
+      Map<String, List<FundingEvent>> fundingBySymbol,
+      Map<String, TradingStrategy> strategiesBySymbol,
+      Map<String, List<Candle>> perpSubBarCandlesBySymbol,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      RiskManagerPort rm) {
+    return run(
+        perpCandlesBySymbol,
+        spotCandlesBySymbol,
+        fundingBySymbol,
+        Map.of(),
+        strategiesBySymbol,
+        perpSubBarCandlesBySymbol,
+        interval,
+        cfg,
+        rm);
+  }
+
+  /** Overload without sub-bar realism or premium-index data (original close-only timing). */
   public static BacktestResult run(
       Map<String, List<Candle>> perpCandlesBySymbol,
       Map<String, List<Candle>> spotCandlesBySymbol,

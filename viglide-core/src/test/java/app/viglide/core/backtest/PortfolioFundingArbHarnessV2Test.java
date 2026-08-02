@@ -451,6 +451,84 @@ class PortfolioFundingArbHarnessV2Test {
     assertThat(r1).isEqualTo(r2);
   }
 
+  // ── PLAN-015 Task C: premium-index nowcast window is time-gated (no lookahead) ─────────────────
+
+  @Test
+  void premiumIndexWindow_onlyExposesEventsNotAfterCurrentBarOpenTime() {
+    Map<String, List<Candle>> perpBySymbol = new LinkedHashMap<>();
+    perpBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+    Map<String, List<Candle>> spotBySymbol = new LinkedHashMap<>();
+    spotBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+
+    List<app.viglide.core.domain.PremiumIndexEvent> premiumIndex =
+        List.of(
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
+            new app.viglide.core.domain.PremiumIndexEvent(
+                T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
+    Map<String, List<app.viglide.core.domain.PremiumIndexEvent>> premiumIndexBySymbol =
+        new LinkedHashMap<>();
+    premiumIndexBySymbol.put("AAA", premiumIndex);
+
+    RecordingStrategy strategy = new RecordingStrategy();
+    Map<String, TradingStrategy> strategies = new LinkedHashMap<>();
+    strategies.put("AAA", strategy);
+
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"),
+            FeeModel.binanceDefault(),
+            3,
+            new BigDecimal("1.0"),
+            null,
+            null,
+            8760);
+    RiskManagerPort rm = fixedNotionalRm(new BigDecimal("500"));
+
+    PortfolioFundingArbHarnessV2.run(
+        perpBySymbol,
+        spotBySymbol,
+        Map.of(),
+        premiumIndexBySymbol,
+        strategies,
+        Map.of(),
+        CandleInterval.ONE_HOUR,
+        cfg,
+        rm);
+
+    assertThat(strategy.seenPremiumIndexHistories).hasSizeGreaterThanOrEqualTo(2);
+    // Eval 0 (asOf = T0+2h): the T0+3h sample must not be visible yet.
+    assertThat(strategy.seenPremiumIndexHistories.get(0))
+        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .containsExactly(T0.plus(Duration.ofHours(1)), T0.plus(Duration.ofHours(2)));
+    // Eval 1 (asOf = T0+3h): now visible.
+    assertThat(strategy.seenPremiumIndexHistories.get(1))
+        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .containsExactly(
+            T0.plus(Duration.ofHours(1)),
+            T0.plus(Duration.ofHours(2)),
+            T0.plus(Duration.ofHours(3)));
+  }
+
+  /** Records each evaluation's {@code premiumIndexHistory} snapshot; never signals. */
+  private static final class RecordingStrategy implements TradingStrategy {
+    final List<List<app.viglide.core.domain.PremiumIndexEvent>> seenPremiumIndexHistories =
+        new java.util.ArrayList<>();
+
+    @Override
+    public Optional<TechnicalSignal> evaluate(MarketContext ctx) {
+      seenPremiumIndexHistories.add(List.copyOf(ctx.premiumIndexHistory()));
+      return Optional.empty();
+    }
+
+    @Override
+    public StrategyMetadata metadata() {
+      return new StrategyMetadata("Recording", "0.0.0", "test-only");
+    }
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
   /** A fixed-notional RM: approves every BUY at exactly {@code notional}, always a $1 stop. */
