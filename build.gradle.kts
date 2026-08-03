@@ -2,5 +2,5 @@
 
 allprojects {
     group = "app.viglide"
-    version = "0.1.0"
+    version = "DEV-SNAPSHOT"
 }
