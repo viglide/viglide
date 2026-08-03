@@ -6,7 +6,7 @@ jqwik         = "1.9.1"
 assertj       = "3.26.3"
 archunit      = "1.4.2"
 spotless      = "7.0.3"
-wiremock      = "3.9.2"
+wiremock      = "3.13.2"
 
 [libraries]
 # Spring Boot BOM — use as platform() in modules that need Spring version management.
