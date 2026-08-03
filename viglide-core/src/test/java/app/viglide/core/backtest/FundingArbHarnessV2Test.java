@@ -8,6 +8,7 @@ import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.Direction;
 import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.MarketContext;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.spi.StrategyKind;
 import app.viglide.core.spi.StrategyMetadata;
@@ -391,14 +392,11 @@ class FundingArbHarnessV2Test {
     List<Candle> spot = flatCandles(6, new BigDecimal("100"));
 
     // First evaluation is bar index 2 (openTime T0+2h); second is bar index 3 (T0+3h).
-    List<app.viglide.core.domain.PremiumIndexEvent> premiumIndex =
+    List<PremiumIndexEvent> premiumIndex =
         List.of(
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
 
     RecordingStrategy strategy = new RecordingStrategy();
     BacktestConfig cfg =
@@ -423,24 +421,205 @@ class FundingArbHarnessV2Test {
         Optional.empty(),
         List.of());
 
-    assertThat(strategy.seenPremiumIndexHistories).hasSizeGreaterThanOrEqualTo(2);
+    // 6 bars, warmupBars=3 ⇒ the window first fills at bar 2 and evaluates on bars 2..5.
+    assertThat(strategy.seenPremiumIndexHistories).hasSize(4);
     // Eval 0 (asOf = T0+2h): the T0+3h sample must not be visible yet.
     assertThat(strategy.seenPremiumIndexHistories.get(0))
-        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .extracting(PremiumIndexEvent::time)
         .containsExactly(T0.plus(Duration.ofHours(1)), T0.plus(Duration.ofHours(2)));
     // Eval 1 (asOf = T0+3h): now visible.
     assertThat(strategy.seenPremiumIndexHistories.get(1))
-        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .extracting(PremiumIndexEvent::time)
         .containsExactly(
             T0.plus(Duration.ofHours(1)),
             T0.plus(Duration.ofHours(2)),
             T0.plus(Duration.ofHours(3)));
   }
 
+  @Test
+  void premiumIndexWindow_denselySampledSeriesCutsExactlyAtTheBarBoundary() {
+    // The dense regime the field exists for: 1-minute samples against 1-hour bars, so most
+    // samples fall strictly *between* decision bars rather than on a boundary. Samples run
+    // T0+1m .. T0+5h inclusive.
+    List<Candle> perp = flatCandles(6, new BigDecimal("100"));
+    List<Candle> spot = flatCandles(6, new BigDecimal("100"));
+    List<PremiumIndexEvent> premiumIndex = new ArrayList<>();
+    for (int m = 1; m <= 5 * 60; m++) {
+      premiumIndex.add(
+          new PremiumIndexEvent(T0.plus(Duration.ofMinutes(m)), new BigDecimal("0.0001")));
+    }
+
+    RecordingStrategy strategy = new RecordingStrategy();
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"), FeeModel.taker(), 3, new BigDecimal("0.5"), null, null, 8760);
+
+    FundingArbHarnessV2.run(
+        strategy,
+        perp,
+        spot,
+        List.of(),
+        premiumIndex,
+        SYMBOL,
+        CandleInterval.ONE_HOUR,
+        cfg,
+        Optional.empty(),
+        List.of());
+
+    // Eval 0 is the bar opening at T0+2h: everything up to and including T0+2h exactly, and
+    // nothing after — T0+2h01m belongs to the bar the strategy has not been shown yet.
+    List<PremiumIndexEvent> firstEval = strategy.seenPremiumIndexHistories.get(0);
+    assertThat(firstEval).hasSize(120); // T0+1m .. T0+2h00m
+    assertThat(firstEval.getLast().time()).isEqualTo(T0.plus(Duration.ofHours(2)));
+    assertThat(firstEval)
+        .extracting(PremiumIndexEvent::time)
+        .doesNotContain(T0.plus(Duration.ofMinutes(121)));
+  }
+
+  @Test
+  void premiumIndexWindow_isCappedSoTheHarnessStaysLinearInBarCount() {
+    // An unbounded window is deep-copied into every bar's MarketContext, which makes the whole
+    // harness quadratic in bar count (measured: 7ms → 14.7s over a year of 1h bars with a 1m
+    // series). Evict from the head so a nowcast keeps its most recent samples.
+    int samples = FundingArbHarnessV2.PREMIUM_INDEX_WINDOW_MAX_SAMPLES + 500;
+    List<Candle> perp = flatCandles(6, new BigDecimal("100"));
+    List<Candle> spot = flatCandles(6, new BigDecimal("100"));
+
+    // All `samples` land at or before bar 2's openTime (T0+2h), so the very first evaluation
+    // already has more than the cap available to it.
+    Instant firstSample = T0.plus(Duration.ofHours(2)).minus(Duration.ofSeconds(samples - 1L));
+    List<PremiumIndexEvent> premiumIndex = new ArrayList<>();
+    for (int i = 0; i < samples; i++) {
+      premiumIndex.add(
+          new PremiumIndexEvent(firstSample.plus(Duration.ofSeconds(i)), new BigDecimal("0.0001")));
+    }
+
+    RecordingStrategy strategy = new RecordingStrategy();
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"), FeeModel.taker(), 3, new BigDecimal("0.5"), null, null, 8760);
+
+    FundingArbHarnessV2.run(
+        strategy,
+        perp,
+        spot,
+        List.of(),
+        premiumIndex,
+        SYMBOL,
+        CandleInterval.ONE_HOUR,
+        cfg,
+        Optional.empty(),
+        List.of());
+
+    List<PremiumIndexEvent> firstEval = strategy.seenPremiumIndexHistories.get(0);
+    assertThat(firstEval).hasSize(FundingArbHarnessV2.PREMIUM_INDEX_WINDOW_MAX_SAMPLES);
+    // The newest sample survives and the oldest is the one dropped — head eviction, not tail.
+    assertThat(firstEval.getLast().time()).isEqualTo(T0.plus(Duration.ofHours(2)));
+    assertThat(firstEval.getFirst().time()).isAfter(firstSample);
+  }
+
+  // ── PLAN-015 Task C: per-run premium-index data-integrity guard ───────────────────────────────
+
+  @Test
+  void premiumIndexSeriesCoarserThanTheBarIsRejected() {
+    // A row is stamped with its kline's open time but carries that kline's close value, so a 4h
+    // series shown to a 1h bar would leak up to 3h of future information.
+    List<PremiumIndexEvent> fourHourly =
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(4)), new BigDecimal("0.0002")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(8)), new BigDecimal("0.0003")));
+
+    assertThatThrownBy(
+            () ->
+                FundingArbHarnessV2.validatePremiumIndexSeries(
+                    fourHourly, CandleInterval.ONE_HOUR, SYMBOL))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("PT4H")
+        .hasMessageContaining("PT1H")
+        .hasMessageContaining("lookahead");
+  }
+
+  @Test
+  void runRejectsACoarserThanBarSeriesBeforeWalkingAnyBar() {
+    // The guard is only worth having if run() actually calls it — assert the wiring, not just
+    // the helper.
+    List<Candle> perp = flatCandles(6, new BigDecimal("100"));
+    List<Candle> spot = flatCandles(6, new BigDecimal("100"));
+    List<PremiumIndexEvent> fourHourly =
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(4)), new BigDecimal("0.0002")));
+    RecordingStrategy strategy = new RecordingStrategy();
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"), FeeModel.taker(), 3, new BigDecimal("0.5"), null, null, 8760);
+
+    assertThatThrownBy(
+            () ->
+                FundingArbHarnessV2.run(
+                    strategy,
+                    perp,
+                    spot,
+                    List.of(),
+                    fourHourly,
+                    SYMBOL,
+                    CandleInterval.ONE_HOUR,
+                    cfg,
+                    Optional.empty(),
+                    List.of()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("lookahead");
+    // Rejected up front — the strategy was never evaluated even once.
+    assertThat(strategy.seenPremiumIndexHistories).isEmpty();
+  }
+
+  @Test
+  void premiumIndexSeriesOutOfOrderIsRejected() {
+    // The drain is a monotonic cursor: without this guard the inverted sample and everything
+    // after it would be silently dropped while diag still reported the full input size.
+    List<PremiumIndexEvent> inverted =
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(1)), new BigDecimal("0.0003")));
+
+    assertThatThrownBy(
+            () ->
+                FundingArbHarnessV2.validatePremiumIndexSeries(
+                    inverted, CandleInterval.ONE_HOUR, SYMBOL))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("ascending time order at index 2")
+        .hasMessageContaining(SYMBOL);
+  }
+
+  @Test
+  void premiumIndexSeriesFinerThanOrEqualToTheBarIsAccepted() {
+    List<PremiumIndexEvent> minutely = new ArrayList<>();
+    for (int m = 0; m < 180; m++) {
+      minutely.add(new PremiumIndexEvent(T0.plus(Duration.ofMinutes(m)), new BigDecimal("0.0001")));
+    }
+    // Finer than the bar.
+    FundingArbHarnessV2.validatePremiumIndexSeries(minutely, CandleInterval.ONE_HOUR, SYMBOL);
+    // Exactly the bar cadence — the common aligned case, must not trip the strict `>` comparison.
+    List<PremiumIndexEvent> hourly =
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(1)), new BigDecimal("0.0002")));
+    FundingArbHarnessV2.validatePremiumIndexSeries(hourly, CandleInterval.ONE_HOUR, SYMBOL);
+    // A hole in an otherwise 1m series must not be mistaken for a coarse cadence (the guard
+    // estimates cadence from the minimum gap, not the maximum).
+    List<PremiumIndexEvent> gappy =
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofMinutes(1)), new BigDecimal("0.0002")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(9)), new BigDecimal("0.0003")));
+    FundingArbHarnessV2.validatePremiumIndexSeries(gappy, CandleInterval.ONE_HOUR, SYMBOL);
+  }
+
   /** Records each evaluation's {@code premiumIndexHistory} snapshot; never signals. */
   private static final class RecordingStrategy implements TradingStrategy {
-    final List<List<app.viglide.core.domain.PremiumIndexEvent>> seenPremiumIndexHistories =
-        new ArrayList<>();
+    final List<List<PremiumIndexEvent>> seenPremiumIndexHistories = new ArrayList<>();
 
     @Override
     public Optional<TechnicalSignal> evaluate(MarketContext ctx) {

@@ -159,14 +159,19 @@ public final class BacktestCli {
 
     // PLAN-015 Task C: premium-index nowcast series, distinct from realised `funding` above (see
     // MarketContext.premiumIndexHistory's Javadoc). Absent by default -- omitting it leaves every
-    // pre-existing run byte-identical.
+    // pre-existing run byte-identical. Only the two-leg v2 funding-arb harness consumes it, so
+    // reject the flag anywhere else rather than parsing a dense CSV and silently dropping it --
+    // a mistyped --funding-model must not degrade into an ignored flag (CLAUDE.md §5).
     String premiumIndexDataset = args.get("premium-index-dataset");
-    List<PremiumIndexEvent> premiumIndex = List.of();
-    if (premiumIndexDataset != null && !premiumIndexDataset.isBlank()) {
-      try (Stream<PremiumIndexEvent> s =
-          CsvPremiumIndexReader.stream(Paths.get(premiumIndexDataset))) {
-        premiumIndex = s.toList();
-      }
+    boolean fundingArbV2 = fundingAware && "v2".equalsIgnoreCase(fundingModel);
+    if (premiumIndexDataset != null && !premiumIndexDataset.isBlank() && !fundingArbV2) {
+      throw new IllegalArgumentException(
+          "--premium-index-dataset requires a FUNDING_AWARE strategy with --funding-model=v2;"
+              + " got strategy='"
+              + strategyName
+              + "' fundingModel='"
+              + fundingModel
+              + "'");
     }
 
     // Materialised once (not just streamed) so the buy-and-hold benchmark (C.5) can walk the same
@@ -187,12 +192,21 @@ public final class BacktestCli {
     }
 
     BacktestResult result;
-    if (fundingAware && "v2".equalsIgnoreCase(fundingModel)) {
+    if (fundingArbV2) {
       // PLAN-008 Task F: the two-leg model needs the spot leg's own price series.
       List<Candle> spotCandles;
       try (Stream<Candle> s =
           CsvKlineReader.stream(Paths.get(Args.require(args, "spot-dataset")))) {
         spotCandles = s.toList();
+      }
+      // Read only on the branch that consumes it -- this series is dense (a year of 1m samples
+      // is ~525k rows), so parsing it on a path that discards it is pure waste.
+      List<PremiumIndexEvent> premiumIndex = List.of();
+      if (premiumIndexDataset != null && !premiumIndexDataset.isBlank()) {
+        try (Stream<PremiumIndexEvent> s =
+            CsvPremiumIndexReader.stream(Paths.get(premiumIndexDataset))) {
+          premiumIndex = s.toList();
+        }
       }
       result =
           FundingArbHarnessV2.run(

@@ -109,6 +109,12 @@ public final class PortfolioFundingArbHarnessV2 {
     if (!strategiesBySymbol.keySet().containsAll(perpCandlesBySymbol.keySet())) {
       throw new IllegalArgumentException("every symbol in perpCandlesBySymbol needs a strategy");
     }
+    // PLAN-015 Task C: same per-run premium-index guard the single-symbol harness applies (see
+    // FundingArbHarnessV2#validatePremiumIndexSeries) — checked for every symbol before any bar
+    // is walked, so a bad series fails the run rather than one pair's evaluations.
+    for (Map.Entry<String, List<PremiumIndexEvent>> e : premiumIndexBySymbol.entrySet()) {
+      FundingArbHarnessV2.validatePremiumIndexSeries(e.getValue(), interval, e.getKey());
+    }
 
     Set<String> symbols = perpCandlesBySymbol.keySet();
     BigDecimal singleLegAdverse = cfg.fees().totalAdverseFactor(IndicatorMath.MC);
@@ -225,11 +231,17 @@ public final class PortfolioFundingArbHarnessV2 {
         List<PremiumIndexEvent> premiumIndexList =
             premiumIndexBySymbol.getOrDefault(symbol, List.of());
         int pIdx = premiumIndexIdx.get(symbol);
+        Deque<PremiumIndexEvent> premiumIndexWindow = premiumIndexWindows.get(symbol);
         while (pIdx < premiumIndexList.size()
             && !premiumIndexList.get(pIdx).time().isAfter(perp.openTime())) {
-          premiumIndexWindows.get(symbol).addLast(premiumIndexList.get(pIdx++));
+          premiumIndexWindow.addLast(premiumIndexList.get(pIdx++));
         }
         premiumIndexIdx.put(symbol, pIdx);
+        // Evict from the head, never the tail — see
+        // FundingArbHarnessV2#PREMIUM_INDEX_WINDOW_MAX_SAMPLES for why this must be bounded.
+        while (premiumIndexWindow.size() > FundingArbHarnessV2.PREMIUM_INDEX_WINDOW_MAX_SAMPLES) {
+          premiumIndexWindow.pollFirst();
+        }
 
         // Slice this symbol's perp sub-bars (if any) covering this bar's window.
         List<Candle> perpSubBarCandles = perpSubBarCandlesBySymbol.getOrDefault(symbol, List.of());

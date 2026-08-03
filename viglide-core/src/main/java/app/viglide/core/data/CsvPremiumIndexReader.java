@@ -15,13 +15,22 @@ import java.util.stream.Stream;
  * premiumIndexKlines} bulk-download product — identical column layout to a regular kline ({@code
  * open_time,open,high,low,close,volume,...}) with the premium-index value (a decimal fraction, e.g.
  * {@code 0.00068158}) in place of price and a meaningless zero {@code volume}. Mirrors {@link
- * CsvKlineReader} and {@link CsvFundingReader} in spirit: auto-detects epoch-ms vs ISO-8601
- * timestamps and tolerates per-month headers embedded in merged dumps.
+ * CsvKlineReader} and {@link CsvFundingReader} in spirit: column 0 is parsed by {@link
+ * CsvTimestamps} (epoch-ms, epoch-µs or ISO-8601) and per-month headers embedded in merged dumps
+ * are tolerated.
  *
- * <p>Only the {@code close} column is read — the last premium-index sample observed within that
- * bar's window, which is what a decision made <em>at</em> that bar's close would actually have
- * seen. This mirrors how every other strategy in this codebase reads "the current value" off a
- * candle.
+ * <p><strong>Timestamp semantics matter here.</strong> Only the {@code close} column is read — the
+ * last premium-index sample within that kline's window — but the emitted event is stamped with the
+ * kline's {@code open_time}, mirroring how {@link CsvKlineReader} keys a candle. The value a row
+ * carries is therefore only observable at {@code open_time + samplingInterval}, not at {@code
+ * open_time}.
+ *
+ * <p>The consequence: a series read by this class is lookahead-free only while it is sampled at
+ * least as finely as the backtest's decision bars, because the harnesses admit rows at or before a
+ * bar's {@code openTime} and then show the strategy that same bar's close. {@code
+ * FundingArbHarnessV2.validatePremiumIndexSeries} enforces exactly that precondition (and ascending
+ * order) once per run, so a mismatched download fails loudly instead of quietly back-dating future
+ * information.
  */
 public final class CsvPremiumIndexReader {
 
@@ -47,37 +56,12 @@ public final class CsvPremiumIndexReader {
     if (line == null || line.isBlank()) return null;
     String[] parts = line.split(",");
     if (parts.length < 5) return null;
-    Instant time = parseTimestamp(parts[0].trim());
+    Instant time = CsvTimestamps.parseOrNull(parts[0].trim());
     if (time == null) return null;
     try {
       return new PremiumIndexEvent(time, new BigDecimal(parts[4].trim()));
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException("malformed premium-index CSV row: " + line, e);
     }
-  }
-
-  private static final long MICROSECOND_EPOCH_THRESHOLD = 100_000_000_000_000L; // 10^14
-
-  private static Instant parseTimestamp(String s) {
-    if (s.isEmpty()) return null;
-    if (isAllDigits(s)) {
-      try {
-        long raw = Long.parseLong(s);
-        long ms = raw >= MICROSECOND_EPOCH_THRESHOLD ? raw / 1000 : raw;
-        return Instant.ofEpochMilli(ms);
-      } catch (NumberFormatException e) {
-        return null;
-      }
-    }
-    try {
-      return Instant.parse(s);
-    } catch (java.time.format.DateTimeParseException e) {
-      return null;
-    }
-  }
-
-  private static boolean isAllDigits(String s) {
-    for (int i = 0; i < s.length(); i++) if (!Character.isDigit(s.charAt(i))) return false;
-    return true;
   }
 }

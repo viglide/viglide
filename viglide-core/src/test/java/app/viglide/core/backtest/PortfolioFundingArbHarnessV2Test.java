@@ -1,6 +1,7 @@
 package app.viglide.core.backtest;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import app.viglide.core.domain.Candle;
 import app.viglide.core.domain.CandleInterval;
@@ -8,6 +9,7 @@ import app.viglide.core.domain.Direction;
 import app.viglide.core.domain.Factor;
 import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.MarketContext;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.risk.ExecutionDecision;
@@ -19,6 +21,7 @@ import app.viglide.core.spi.TradingStrategy;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -460,16 +463,12 @@ class PortfolioFundingArbHarnessV2Test {
     Map<String, List<Candle>> spotBySymbol = new LinkedHashMap<>();
     spotBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
 
-    List<app.viglide.core.domain.PremiumIndexEvent> premiumIndex =
+    List<PremiumIndexEvent> premiumIndex =
         List.of(
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
-            new app.viglide.core.domain.PremiumIndexEvent(
-                T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
-    Map<String, List<app.viglide.core.domain.PremiumIndexEvent>> premiumIndexBySymbol =
-        new LinkedHashMap<>();
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(1)), new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(2)), new BigDecimal("0.0002")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(3)), new BigDecimal("0.0003")));
+    Map<String, List<PremiumIndexEvent>> premiumIndexBySymbol = new LinkedHashMap<>();
     premiumIndexBySymbol.put("AAA", premiumIndex);
 
     RecordingStrategy strategy = new RecordingStrategy();
@@ -498,24 +497,128 @@ class PortfolioFundingArbHarnessV2Test {
         cfg,
         rm);
 
-    assertThat(strategy.seenPremiumIndexHistories).hasSizeGreaterThanOrEqualTo(2);
+    // 6 bars, warmupBars=3 ⇒ the window first fills at bar 2 and evaluates on bars 2..5.
+    assertThat(strategy.seenPremiumIndexHistories).hasSize(4);
     // Eval 0 (asOf = T0+2h): the T0+3h sample must not be visible yet.
     assertThat(strategy.seenPremiumIndexHistories.get(0))
-        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .extracting(PremiumIndexEvent::time)
         .containsExactly(T0.plus(Duration.ofHours(1)), T0.plus(Duration.ofHours(2)));
     // Eval 1 (asOf = T0+3h): now visible.
     assertThat(strategy.seenPremiumIndexHistories.get(1))
-        .extracting(app.viglide.core.domain.PremiumIndexEvent::time)
+        .extracting(PremiumIndexEvent::time)
         .containsExactly(
             T0.plus(Duration.ofHours(1)),
             T0.plus(Duration.ofHours(2)),
             T0.plus(Duration.ofHours(3)));
   }
 
+  @Test
+  void premiumIndexWindow_denselySampledSeriesIsCutAtTheBarBoundaryAndCapped() {
+    // The dense regime the field exists for: 1-minute samples against 1-hour bars. Also exercises
+    // the per-symbol window cap (see FundingArbHarnessV2#PREMIUM_INDEX_WINDOW_MAX_SAMPLES) — an
+    // unbounded window here is quadratic per symbol.
+    Map<String, List<Candle>> perpBySymbol = new LinkedHashMap<>();
+    perpBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+    Map<String, List<Candle>> spotBySymbol = new LinkedHashMap<>();
+    spotBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+
+    List<PremiumIndexEvent> premiumIndex = new ArrayList<>();
+    for (int m = 1; m <= 5 * 60; m++) {
+      premiumIndex.add(
+          new PremiumIndexEvent(T0.plus(Duration.ofMinutes(m)), new BigDecimal("0.0001")));
+    }
+    Map<String, List<PremiumIndexEvent>> premiumIndexBySymbol = new LinkedHashMap<>();
+    premiumIndexBySymbol.put("AAA", premiumIndex);
+
+    RecordingStrategy strategy = new RecordingStrategy();
+    Map<String, TradingStrategy> strategies = new LinkedHashMap<>();
+    strategies.put("AAA", strategy);
+
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"),
+            FeeModel.binanceDefault(),
+            3,
+            new BigDecimal("1.0"),
+            null,
+            null,
+            8760);
+
+    PortfolioFundingArbHarnessV2.run(
+        perpBySymbol,
+        spotBySymbol,
+        Map.of(),
+        premiumIndexBySymbol,
+        strategies,
+        Map.of(),
+        CandleInterval.ONE_HOUR,
+        cfg,
+        fixedNotionalRm(new BigDecimal("500")));
+
+    // Eval 0 is the bar opening at T0+2h: everything up to and including T0+2h exactly, nothing
+    // after — T0+2h01m belongs to a bar the strategy has not been shown yet.
+    List<PremiumIndexEvent> firstEval = strategy.seenPremiumIndexHistories.get(0);
+    assertThat(firstEval).hasSize(120); // T0+1m .. T0+2h00m
+    assertThat(firstEval.getLast().time()).isEqualTo(T0.plus(Duration.ofHours(2)));
+    assertThat(firstEval)
+        .extracting(PremiumIndexEvent::time)
+        .doesNotContain(T0.plus(Duration.ofMinutes(121)));
+    // Every window stays within the cap.
+    assertThat(strategy.seenPremiumIndexHistories)
+        .allSatisfy(
+            seen ->
+                assertThat(seen.size())
+                    .isLessThanOrEqualTo(FundingArbHarnessV2.PREMIUM_INDEX_WINDOW_MAX_SAMPLES));
+  }
+
+  @Test
+  void premiumIndexSeriesIsValidatedPerSymbolBeforeAnyBarIsWalked() {
+    Map<String, List<Candle>> perpBySymbol = new LinkedHashMap<>();
+    perpBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+    Map<String, List<Candle>> spotBySymbol = new LinkedHashMap<>();
+    spotBySymbol.put("AAA", flatCandles(6, new BigDecimal("100")));
+    Map<String, TradingStrategy> strategies = new LinkedHashMap<>();
+    strategies.put("AAA", new RecordingStrategy());
+
+    // 4h cadence against 1h bars — each sample carries its kline's close, so it would only be
+    // observable well after the bar it is shown to.
+    Map<String, List<PremiumIndexEvent>> premiumIndexBySymbol = new LinkedHashMap<>();
+    premiumIndexBySymbol.put(
+        "AAA",
+        List.of(
+            new PremiumIndexEvent(T0, new BigDecimal("0.0001")),
+            new PremiumIndexEvent(T0.plus(Duration.ofHours(4)), new BigDecimal("0.0002"))));
+
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"),
+            FeeModel.binanceDefault(),
+            3,
+            new BigDecimal("1.0"),
+            null,
+            null,
+            8760);
+
+    assertThatThrownBy(
+            () ->
+                PortfolioFundingArbHarnessV2.run(
+                    perpBySymbol,
+                    spotBySymbol,
+                    Map.of(),
+                    premiumIndexBySymbol,
+                    strategies,
+                    Map.of(),
+                    CandleInterval.ONE_HOUR,
+                    cfg,
+                    fixedNotionalRm(new BigDecimal("500"))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("AAA")
+        .hasMessageContaining("lookahead");
+  }
+
   /** Records each evaluation's {@code premiumIndexHistory} snapshot; never signals. */
   private static final class RecordingStrategy implements TradingStrategy {
-    final List<List<app.viglide.core.domain.PremiumIndexEvent>> seenPremiumIndexHistories =
-        new java.util.ArrayList<>();
+    final List<List<PremiumIndexEvent>> seenPremiumIndexHistories = new ArrayList<>();
 
     @Override
     public Optional<TechnicalSignal> evaluate(MarketContext ctx) {

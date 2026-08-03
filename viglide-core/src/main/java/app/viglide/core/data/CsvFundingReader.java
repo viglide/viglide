@@ -12,8 +12,8 @@ import java.util.stream.Stream;
 
 /**
  * Streams Binance perpetual-future funding-rate events from a CSV file. Mirrors {@link
- * CsvKlineReader} in spirit: auto-detects epoch-ms vs ISO-8601 timestamps and tolerates per-month
- * headers embedded in merged dumps.
+ * CsvKlineReader} in spirit: column 0 is parsed by {@link CsvTimestamps} (epoch-ms, epoch-µs or
+ * ISO-8601) and per-month headers embedded in merged dumps are tolerated.
  *
  * <p>Expected layout: column 0 is the funding timestamp; column 2 (skipping {@code
  * funding_interval_hours}) is the decimal rate. Two-column variants (time, rate) are also supported
@@ -43,7 +43,7 @@ public final class CsvFundingReader {
     if (line == null || line.isBlank()) return null;
     String[] parts = line.split(",");
     if (parts.length < 2) return null;
-    Instant time = parseTimestamp(parts[0].trim());
+    Instant time = CsvTimestamps.parseOrNull(parts[0].trim());
     if (time == null) return null;
     int rateIdx = parts.length >= 3 ? 2 : 1;
     try {
@@ -51,26 +51,5 @@ public final class CsvFundingReader {
     } catch (NumberFormatException e) {
       throw new IllegalArgumentException("malformed funding CSV row: " + line, e);
     }
-  }
-
-  private static Instant parseTimestamp(String s) {
-    if (s.isEmpty()) return null;
-    if (isAllDigits(s)) {
-      try {
-        return Instant.ofEpochMilli(Long.parseLong(s));
-      } catch (NumberFormatException e) {
-        return null;
-      }
-    }
-    try {
-      return Instant.parse(s);
-    } catch (java.time.format.DateTimeParseException e) {
-      return null;
-    }
-  }
-
-  private static boolean isAllDigits(String s) {
-    for (int i = 0; i < s.length(); i++) if (!Character.isDigit(s.charAt(i))) return false;
-    return true;
   }
 }

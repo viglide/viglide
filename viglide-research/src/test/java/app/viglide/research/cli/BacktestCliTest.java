@@ -17,6 +17,31 @@ import org.junit.jupiter.api.io.TempDir;
 class BacktestCliTest {
 
   @Test
+  void premiumIndexDataset_onANonV2FundingArbPath_throwsRatherThanBeingSilentlyIgnored(
+      @TempDir Path tmp) throws IOException {
+    // PLAN-015 Task C: only the two-leg v2 funding-arb harness consumes the premium-index series.
+    // An OHLCV strategy used to parse the (dense) CSV and discard it, so a mistyped
+    // --funding-model or --strategy degraded into a silently ignored flag.
+    Path premiumIndex = tmp.resolve("premiumidx.csv");
+    Files.writeString(premiumIndex, "1704067200000,0.0007,0.0013,0.0005,0.0006,0\n");
+
+    assertThatThrownBy(
+            () ->
+                BacktestCli.main(
+                    new String[] {
+                      "--strategy=emarsi",
+                      "--dataset=" + tmp.resolve("does-not-exist.csv"),
+                      "--symbol=BTCUSDT",
+                      "--interval=ONE_HOUR",
+                      "--out=" + tmp.resolve("out"),
+                      "--premium-index-dataset=" + premiumIndex
+                    }))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("--premium-index-dataset requires a FUNDING_AWARE strategy")
+        .hasMessageContaining("emarsi");
+  }
+
+  @Test
   void ensembleFromWinners_missingEntry_throwsRatherThanSilentlyDefaulting(@TempDir Path tmp)
       throws IOException {
     Path winnersPath = tmp.resolve("winners.json");

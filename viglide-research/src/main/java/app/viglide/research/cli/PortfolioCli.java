@@ -248,13 +248,24 @@ public final class PortfolioCli {
         }
 
         // PLAN-015 Task C: premium-index nowcast series, optional and non-fatal -- a pair missing
-        // it just falls back to realised-history-only for that pair (see FundingCarryNowcast-
-        // Strategy's own fallback), never excludes the pair the way a missing funding file does.
-        Path premiumIndexPath =
-            datasetsDir.resolve(pair + "_premiumidx_" + intervalTag + "_" + label + ".csv");
-        if (Files.exists(premiumIndexPath)) {
-          try (Stream<PremiumIndexEvent> s = CsvPremiumIndexReader.stream(premiumIndexPath)) {
-            premiumIndexBySymbol.put(pair, s.toList());
+        // it keeps an empty premiumIndexHistory and its strategy is expected to fall back to
+        // realised funding history, never excluded the way a missing funding file excludes a
+        // pair. Only the v2 harness accepts the series at all, so don't parse a dense CSV per
+        // pair that PortfolioBacktestHarness would then discard.
+        if ("v2".equals(fundingModel)) {
+          Path premiumIndexPath =
+              datasetsDir.resolve(pair + "_premiumidx_" + intervalTag + "_" + label + ".csv");
+          if (Files.exists(premiumIndexPath)) {
+            try (Stream<PremiumIndexEvent> s = CsvPremiumIndexReader.stream(premiumIndexPath)) {
+              premiumIndexBySymbol.put(pair, s.toList());
+            }
+          } else {
+            System.out.println(
+                "[WARN] no premium-index dataset "
+                    + premiumIndexPath
+                    + " — "
+                    + pair
+                    + " falls back to realised-funding history only");
           }
         }
       }
