@@ -5,6 +5,7 @@ import app.viglide.core.backtest.BacktestResult;
 import app.viglide.core.backtest.EconomicMetrics;
 import app.viglide.core.backtest.EquityPoint;
 import app.viglide.core.backtest.FeeModel;
+import app.viglide.core.backtest.LiquidationEvent;
 import app.viglide.core.backtest.Metrics;
 import app.viglide.core.backtest.PortfolioBacktestHarness;
 import app.viglide.core.backtest.PortfolioFundingArbHarnessV2;
@@ -371,12 +372,23 @@ public final class PortfolioCli {
     resultJson.put("feeScale", Args.bigDecOpt(args, "fee-scale", DEFAULT_FEE_SCALE));
     resultJson.put("feeMode", Args.opt(args, "fee-mode", DEFAULT_FEE_MODE));
     resultJson.put("config", configToMap(cfg));
-    resultJson.put("diagnostics", new LinkedHashMap<>(result.diagnostics()));
+    // Per-event liquidation records go to their own CSV, like trades/equity/refusals -- not into
+    // result.json. JsonWriter only accepts null/String/Boolean/Number/Map/List and throws on any
+    // other type, so leaving a List<LiquidationEvent> in the diagnostics map would fail the write
+    // *after* the whole backtest had run, and only on runs that actually liquidated.
+    Map<String, Object> diagnosticsJson = new LinkedHashMap<>(result.diagnostics());
+    @SuppressWarnings("unchecked")
+    List<LiquidationEvent> liquidationEvents =
+        (List<LiquidationEvent>) diagnosticsJson.remove("liquidationEvents");
+    resultJson.put("diagnostics", diagnosticsJson);
 
     Files.writeString(outDir.resolve("result.json"), JsonWriter.pretty(resultJson));
     Files.writeString(outDir.resolve("trades.csv"), tradesCsv(result.trades()));
     Files.writeString(outDir.resolve("equity.csv"), equityCsv(result.equityCurve()));
     Files.writeString(outDir.resolve("refusals.csv"), refusalsCsv(result.refusals()));
+    if (liquidationEvents != null) {
+      Files.writeString(outDir.resolve("liquidations.csv"), liquidationsCsv(liquidationEvents));
+    }
   }
 
   private static String tradesCsv(List<Trade> trades) {
@@ -398,6 +410,36 @@ public final class PortfolioCli {
           .append(t.pnl().toPlainString())
           .append(',')
           .append(t.exitReason())
+          .append('\n');
+    }
+    return sb.toString();
+  }
+
+  /**
+   * Per-liquidation attribution (PLAN-019 Task A): which symbol, when, what tripped the guard, and
+   * the book's leverage at that instant. One row per event, so a triage can group by month or
+   * symbol without re-running the backtest.
+   */
+  private static String liquidationsCsv(List<LiquidationEvent> events) {
+    StringBuilder sb = new StringBuilder();
+    sb.append(
+        "time,symbol,perp_loss,margin_threshold,overshoot,book_notional,equity,book_leverage\n");
+    for (LiquidationEvent e : events) {
+      sb.append(e.time())
+          .append(',')
+          .append(e.symbol())
+          .append(',')
+          .append(e.perpLoss().toPlainString())
+          .append(',')
+          .append(e.marginThreshold().toPlainString())
+          .append(',')
+          .append(e.overshoot().toPlainString())
+          .append(',')
+          .append(e.bookNotionalAtLiquidation().toPlainString())
+          .append(',')
+          .append(e.equityAtLiquidation().toPlainString())
+          .append(',')
+          .append(e.bookLeverageAtLiquidation())
           .append('\n');
     }
     return sb.toString();

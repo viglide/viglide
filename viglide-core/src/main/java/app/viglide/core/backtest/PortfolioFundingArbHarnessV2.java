@@ -175,6 +175,7 @@ public final class PortfolioFundingArbHarnessV2 {
     long liquidations = 0;
     List<Refusal> refusals = new ArrayList<>();
     List<EquityPoint> equityCurve = new ArrayList<>();
+    List<LiquidationEvent> liquidationEvents = new ArrayList<>();
 
     for (Instant t : allTimes) {
       for (String symbol : symbols) {
@@ -277,12 +278,36 @@ public final class PortfolioFundingArbHarnessV2 {
                     .close()
                     .subtract(pos.perpEntry(), IndicatorMath.MC)
                     .multiply(pos.q(), IndicatorMath.MC);
-            if (perpLoss.signum() > 0
-                && perpLoss.compareTo(
-                        pos.margin()
-                            .multiply(
-                                FundingArbHarnessV2.LIQUIDATION_MARGIN_BUFFER, IndicatorMath.MC))
-                    >= 0) {
+            BigDecimal marginThreshold =
+                pos.margin()
+                    .multiply(FundingArbHarnessV2.LIQUIDATION_MARGIN_BUFFER, IndicatorMath.MC);
+            if (perpLoss.signum() > 0 && perpLoss.compareTo(marginThreshold) >= 0) {
+              // PLAN-019 Task A: book context at the instant of liquidation, for attribution —
+              // this symbol's freshly-marked notional (lastNotional isn't refreshed until after
+              // this loop) plus every other symbol's last-marked notional.
+              BigDecimal thisSymbolNotional = pos.q().multiply(check.close(), IndicatorMath.MC);
+              BigDecimal bookNotional = thisSymbolNotional;
+              for (Map.Entry<String, BigDecimal> e : lastNotional.entrySet()) {
+                if (!e.getKey().equals(symbol)) {
+                  bookNotional = bookNotional.add(e.getValue(), IndicatorMath.MC);
+                }
+              }
+              BigDecimal equityAtLiquidation = computeEquity(cash, positions, lastPerp, lastSpot);
+              double bookLeverageAtLiquidation =
+                  equityAtLiquidation.signum() > 0
+                      ? bookNotional.divide(equityAtLiquidation, IndicatorMath.MC).doubleValue()
+                      : 0.0;
+              liquidationEvents.add(
+                  new LiquidationEvent(
+                      symbol,
+                      perp.openTime(),
+                      perpLoss,
+                      marginThreshold,
+                      perpLoss.subtract(marginThreshold, IndicatorMath.MC),
+                      bookNotional,
+                      equityAtLiquidation,
+                      bookLeverageAtLiquidation));
+
               CloseOutcome outcome =
                   close(
                       cash,
@@ -515,6 +540,7 @@ public final class PortfolioFundingArbHarnessV2 {
     diag.put("model", "funding-arb-v2");
     diag.put("symbols", symbols.size());
     diag.put("liquidations", liquidations);
+    diag.put("liquidationEvents", List.copyOf(liquidationEvents));
     diag.put("totalFeesPaid", totalFeesPaid);
     long totalPremiumIndexEvents = 0;
     for (String symbol : symbols) {

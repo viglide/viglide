@@ -12,6 +12,7 @@ import app.viglide.core.domain.MarketContext;
 import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.indicator.IndicatorMath;
+import app.viglide.core.params.JsonWriter;
 import app.viglide.core.risk.ExecutionDecision;
 import app.viglide.core.risk.PortfolioState;
 import app.viglide.core.risk.RiskManagerPort;
@@ -306,6 +307,34 @@ class PortfolioFundingArbHarnessV2Test {
     assertThat(result.trades().get(0).exitReason()).isEqualTo(ExitReason.LIQUIDATION_GUARD);
     assertThat(((Number) result.diagnostics().get("liquidations")).longValue()).isEqualTo(1L);
     assertThat(((Number) result.diagnostics().get("trades.BBB")).longValue()).isEqualTo(0L);
+
+    // PLAN-019 Task A: per-event liquidation attribution (symbol, time, book context) — the
+    // aggregate "liquidations" counter alone can't answer the triage's per-event questions.
+    @SuppressWarnings("unchecked")
+    List<LiquidationEvent> events =
+        (List<LiquidationEvent>) result.diagnostics().get("liquidationEvents");
+    assertThat(events).hasSize(1);
+    LiquidationEvent event = events.get(0);
+    assertThat(event.symbol()).isEqualTo("AAA");
+    assertThat(event.perpLoss()).isGreaterThanOrEqualTo(event.marginThreshold());
+    assertThat(event.overshoot())
+        .isEqualByComparingTo(event.perpLoss().subtract(event.marginThreshold()));
+    // BBB never traded, so the book at liquidation is AAA's notional alone.
+    assertThat(event.bookNotionalAtLiquidation())
+        .isEqualByComparingTo(new BigDecimal("50").multiply(rampCloses[4]));
+
+    // "liquidationEvents" is the one diagnostics entry JsonWriter cannot render (it only accepts
+    // null/String/Boolean/Number/Map/List), so every caller that serialises the whole diagnostics
+    // map must remove it first -- PortfolioCli writes it to liquidations.csv instead. Without that,
+    // --funding-model=v2 throws while writing result.json *after* a full backtest has run, and only
+    // on runs that actually liquidated. Both halves are asserted so that adding another
+    // record-typed diagnostic fails here rather than at the end of an overnight run.
+    assertThatThrownBy(() -> JsonWriter.pretty(result.diagnostics()))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining(LiquidationEvent.class.getName());
+    Map<String, Object> serialisable = new LinkedHashMap<>(result.diagnostics());
+    serialisable.remove("liquidationEvents");
+    assertThat(JsonWriter.pretty(serialisable)).contains("liquidations");
   }
 
   // ── Test 4: sub-bar realism reused correctly in the portfolio context ───────────────────────
