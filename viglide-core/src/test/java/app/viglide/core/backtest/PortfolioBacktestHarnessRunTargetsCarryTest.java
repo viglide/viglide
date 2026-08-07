@@ -12,6 +12,7 @@ import app.viglide.core.domain.PortfolioContext;
 import app.viglide.core.domain.PositionShape;
 import app.viglide.core.domain.TargetPosition;
 import app.viglide.core.indicator.IndicatorMath;
+import app.viglide.core.params.JsonWriter;
 import app.viglide.core.risk.ExecutionDecision;
 import app.viglide.core.risk.PortfolioState;
 import app.viglide.core.risk.RiskManagerPort;
@@ -267,6 +268,19 @@ class PortfolioBacktestHarnessRunTargetsCarryTest {
     assertThat(events).hasSize(1);
     assertThat(events.get(0).symbol()).isEqualTo("AAA");
     assertThat(events.get(0).perpLoss()).isGreaterThanOrEqualTo(events.get(0).marginThreshold());
+
+    // This overload is the SECOND producer of the "liquidationEvents" key (PortfolioFundingArbHarn-
+    // essV2 is the first). JsonWriter accepts only null/String/Boolean/Number/Map/List and throws
+    // on anything else, so any caller serialising diagnostics wholesale blows up -- but only on a
+    // run that actually liquidated, and only after the whole backtest has completed. PortfolioCli
+    // learned that the hard way (viglide#12); pin the contract here too so the next caller finds
+    // out from a unit test rather than at the end of a multi-hour run.
+    assertThatIllegalArgumentException()
+        .isThrownBy(() -> JsonWriter.pretty(result.diagnostics()))
+        .withMessageContaining(LiquidationEvent.class.getName());
+    Map<String, Object> serialisable = new LinkedHashMap<>(result.diagnostics());
+    serialisable.remove("liquidationEvents");
+    assertThat(JsonWriter.pretty(serialisable)).contains("liquidations");
   }
 
   @Test
