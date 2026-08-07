@@ -13,8 +13,11 @@ import app.viglide.core.domain.PositionShape;
 import app.viglide.core.domain.TargetPosition;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.params.JsonWriter;
+import app.viglide.core.risk.BacktestClockSync;
 import app.viglide.core.risk.ExecutionDecision;
+import app.viglide.core.risk.MutableClock;
 import app.viglide.core.risk.PortfolioState;
+import app.viglide.core.risk.RiskManager;
 import app.viglide.core.risk.RiskManagerPort;
 import app.viglide.core.risk.RiskParameters;
 import app.viglide.core.spi.PortfolioStrategy;
@@ -22,6 +25,7 @@ import app.viglide.core.spi.StrategyMetadata;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -447,6 +451,58 @@ class PortfolioBacktestHarnessRunTargetsCarryTest {
             BigDecimal.ZERO);
 
     assertThat(r1).isEqualTo(r2);
+  }
+
+  @Test
+  void noTradeBandFix_stableTargetHoldsOnce_underRealRiskManagerCap() {
+    // PLAN-019 Task C review finding, root-caused in
+    // docs/notes/2026-08-07-plan019-task-c-runtargets-two-leg.md and fixed per
+    // docs/notes/2026-08-07-plan019-runtargets-notradeband-fix.md: with a REAL RiskManager (not a
+    // fixed-notional stub), targetWeight=1.0 on a $10,000 book asks for a $10,000 position, but
+    // RiskParameters.defaults()'s maxPositionPct=0.02 caps any single position at ~$200 -- a ~50x
+    // gap that, before the fix, was re-litigated against noTradeBand every single bar (the exact
+    // "144,165 trades, 3.0/bar = k" churn the regression anchor found). This test reproduces that
+    // gap directly and asserts it no longer churns: the position opens once and is held, even
+    // though price keeps moving (so the RM-approved notional keeps moving too) and the target
+    // weight never changes.
+    String symbol = "AAA";
+    int bars = 40;
+    List<Candle> alternating = new ArrayList<>(bars);
+    List<Candle> spotAlternating = new ArrayList<>(bars);
+    for (int i = 0; i < bars; i++) {
+      BigDecimal price = new BigDecimal(i % 2 == 0 ? "100" : "101");
+      Instant t = T0.plusSeconds(3600L * i);
+      // Real, generous volume -- RiskManager's daily-volume cap (0.5% of a 24-bar sum) must not
+      // interfere; this test is about the notional-band mismatch, not the volume cap.
+      Candle c = new Candle(t, price, price, price, price, new BigDecimal("1000000"));
+      alternating.add(c);
+      spotAlternating.add(c);
+    }
+
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"), FeeModel.zero(), 15, new BigDecimal("1.0"), null, null, 8760);
+    MutableClock clock = new MutableClock(Instant.EPOCH, ZoneOffset.UTC);
+    RiskManagerPort realRm =
+        new BacktestClockSync(new RiskManager(RiskParameters.defaults(), clock), clock);
+
+    BacktestResult result =
+        PortfolioBacktestHarness.runTargets(
+            Map.of(symbol, alternating),
+            Map.of(symbol, spotAlternating),
+            Map.of(),
+            Map.of(),
+            new ConstantCarryWeightStrategy(symbol, BigDecimal.ONE),
+            CandleInterval.ONE_HOUR,
+            cfg,
+            realRm,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"));
+
+    // One open, held for the rest of the run despite price moving every bar (so the RM-approved
+    // notional moves too) and despite the target weight never changing -- not one trade per bar.
+    assertThat(result.tradeCount()).isEqualTo(1);
+    assertThat(result.refusals()).isEmpty();
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────────────────────────

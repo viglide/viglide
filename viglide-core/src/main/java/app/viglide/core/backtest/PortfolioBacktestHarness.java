@@ -423,10 +423,16 @@ public final class PortfolioBacktestHarness {
    * @param allocatedCapital the fixed capital base {@code targetWeight} is a fraction of — distinct
    *     from {@code cfg.startingCash()}, which still governs the harness's actual cash ledger; a
    *     strategy allocated less than the full starting cash is a deliberate, supported case
-   * @param noTradeBand fraction of {@code allocatedCapital} a symbol's desired-vs-current notional
-   *     must move before this harness bothers rebalancing it (PLAN-015 Task B: "a real parameter,
-   *     belongs in the calibration space" — this method takes it as a plain argument, calibration
-   *     search over it is a caller concern)
+   * @param noTradeBand fraction of {@code allocatedCapital} the strategy's own desired notional for
+   *     a symbol must move, since the last time this harness actually rebalanced it, before this
+   *     harness bothers rebalancing again (PLAN-015 Task B: "a real parameter, belongs in the
+   *     calibration space" — this method takes it as a plain argument, calibration search over it
+   *     is a caller concern). <strong>Deliberately not compared against the Risk Manager's approved
+   *     notional</strong> (PLAN-019 Task C/D, {@code
+   *     docs/notes/2026-08-07-plan019-runtargets-notradeband-fix.md}): the RM caps every position
+   *     at {@code maxPositionPct × equity}, which for any strategy targeting more than that per
+   *     symbol would create a permanent gap between intent and approved size that no band value
+   *     could ever suppress — every held position would be re-litigated against that gap every bar.
    */
   public static BacktestResult runTargets(
       Map<String, List<Candle>> candlesBySymbol,
@@ -471,6 +477,14 @@ public final class PortfolioBacktestHarness {
     Map<String, Deque<Candle>> windows = new HashMap<>();
     Map<String, SymbolPosition> positions = new HashMap<>();
     Map<String, BigDecimal> lastNotional = new HashMap<>();
+    // The rebalance trigger's memory (docs/notes/2026-08-07-plan019-runtargets-notradeband-fix.md):
+    // the strategy's own last-acted-on desired notional, NOT what the Risk Manager actually
+    // approved. Comparing against the RM's capped `current` created a permanent gap for any
+    // strategy whose target exceeds the RM's per-position cap -- no noTradeBand value could ever
+    // suppress the resulting every-bar re-churn. lastDesired updates only on a successful
+    // close/open this bar (see the two update sites below), never every bar and never on a
+    // refusal, so a refused rebalance is retried next bar instead of silently forgotten.
+    Map<String, BigDecimal> lastDesired = new HashMap<>();
     Map<String, Candle> lastCandle = new HashMap<>();
     Map<String, List<Trade>> tradesBySymbol = new HashMap<>();
     Map<String, Long> barsSkipped = new HashMap<>();
@@ -512,6 +526,7 @@ public final class PortfolioBacktestHarness {
                   tradesBySymbol.get(symbol));
           positions.remove(symbol);
           lastNotional.remove(symbol);
+          lastDesired.remove(symbol);
         }
 
         Deque<Candle> window = windows.get(symbol);
@@ -570,14 +585,20 @@ public final class PortfolioBacktestHarness {
         List<String> closeSymbols = new ArrayList<>();
         List<ExecutionDecision.Execute> opensToApply = new ArrayList<>();
         List<String> openSymbols = new ArrayList<>();
+        Map<String, BigDecimal> desiredBySymbol = new HashMap<>();
 
         for (String symbol : warmContexts.keySet()) {
           BigDecimal desired =
               Optional.ofNullable(targetsBySymbol.get(symbol))
                   .map(tp -> tp.targetWeight().multiply(allocatedCapital, IndicatorMath.MC))
                   .orElse(BigDecimal.ZERO);
+          // `current` (the RM-approved, capped notional) is still used below purely as an
+          // informational value in the synthesised signal's explanation text -- the trigger
+          // decision itself compares against `lastDesired`, never `current`. See the class-field
+          // comment on `lastDesired` for why.
           BigDecimal current = lastNotional.getOrDefault(symbol, BigDecimal.ZERO);
-          BigDecimal delta = desired.subtract(current, IndicatorMath.MC).abs();
+          BigDecimal previousDesired = lastDesired.getOrDefault(symbol, BigDecimal.ZERO);
+          BigDecimal delta = desired.subtract(previousDesired, IndicatorMath.MC).abs();
           if (delta.compareTo(noTradeBandNotional) <= 0) {
             noTradeBandSkips++;
             continue;
@@ -621,6 +642,10 @@ public final class PortfolioBacktestHarness {
             if (decision instanceof ExecutionDecision.Execute exec) {
               opensToApply.add(exec);
               openSymbols.add(symbol);
+              // Raw, pre-scale-down desired -- lastDesired must record what the strategy asked
+              // for, not what the book-level scale-down below ends up actually delivering, or the
+              // exact same re-litigation bug reappears for that cap instead of the RM's.
+              desiredBySymbol.put(symbol, desired);
             } else {
               rmRefusals++;
               ExecutionDecision.Refuse refuse = (ExecutionDecision.Refuse) decision;
@@ -645,6 +670,9 @@ public final class PortfolioBacktestHarness {
                   tradesBySymbol.get(symbol));
           positions.remove(symbol);
           lastNotional.remove(symbol);
+          // If this symbol also reopens this bar, the open-application loop below re-sets
+          // lastDesired to the new target; if not (a pure close), it correctly stays absent.
+          lastDesired.remove(symbol);
         }
 
         // Book-level proportional scale-down (Task B trap): every open above was individually
@@ -699,6 +727,7 @@ public final class PortfolioBacktestHarness {
             positions.put(
                 symbol, new SymbolPosition(scaledSize, candle.close(), t, cashBeforeEntry));
             lastNotional.put(symbol, scaledNotional);
+            lastDesired.put(symbol, desiredBySymbol.get(symbol));
           }
         }
       }
@@ -842,8 +871,11 @@ public final class PortfolioBacktestHarness {
    *     #runTargets}
    * @param rm mandatory — CLAUDE.md §11 forbids an ungated order path, two-leg mode included
    * @param allocatedCapital the fixed capital base {@code targetWeight} is a fraction of
-   * @param noTradeBand fraction of {@code allocatedCapital} a symbol's desired-vs-current notional
-   *     must move before this harness bothers rebalancing it
+   * @param noTradeBand fraction of {@code allocatedCapital} the strategy's own desired notional for
+   *     a symbol must move, since the last time this harness actually rebalanced it, before this
+   *     harness bothers rebalancing again — see the 7-argument {@link #runTargets}'s Javadoc on
+   *     this same parameter for why it is compared against the strategy's own prior intent rather
+   *     than the Risk Manager's approved notional
    */
   public static BacktestResult runTargets(
       Map<String, List<Candle>> perpCandlesBySymbol,
@@ -907,6 +939,9 @@ public final class PortfolioBacktestHarness {
     Map<String, SymbolPosition> positions = new HashMap<>();
     Map<String, PortfolioFundingArbHarnessV2.OpenPosition> carryPositions = new HashMap<>();
     Map<String, BigDecimal> lastNotional = new HashMap<>();
+    // See the 7-argument runTargets's identical field for why this, not lastNotional, drives the
+    // rebalance trigger (docs/notes/2026-08-07-plan019-runtargets-notradeband-fix.md).
+    Map<String, BigDecimal> lastDesired = new HashMap<>();
     Map<String, Candle> lastCandle = new HashMap<>();
     Map<String, Candle> lastSpotCandle = new HashMap<>();
     Map<String, List<Trade>> tradesBySymbol = new HashMap<>();
@@ -972,6 +1007,7 @@ public final class PortfolioBacktestHarness {
                     tradesBySymbol.get(symbol));
             positions.remove(symbol);
             lastNotional.remove(symbol);
+            lastDesired.remove(symbol);
           }
           if (carryPositions.containsKey(symbol)) {
             PortfolioFundingArbHarnessV2.CloseOutcome outcome =
@@ -988,6 +1024,7 @@ public final class PortfolioBacktestHarness {
             totalFeesPaid = totalFeesPaid.add(outcome.feesPaid(), IndicatorMath.MC);
             carryPositions.remove(symbol);
             lastNotional.remove(symbol);
+            lastDesired.remove(symbol);
           }
         }
 
@@ -1162,6 +1199,7 @@ public final class PortfolioBacktestHarness {
 
         List<PendingClose> closesToApply = new ArrayList<>();
         List<PendingOpen> opensToApply = new ArrayList<>();
+        Map<String, BigDecimal> desiredBySymbol = new HashMap<>();
 
         for (String symbol : warmContexts.keySet()) {
           TargetPosition tp = targetsBySymbol.get(symbol);
@@ -1169,8 +1207,12 @@ public final class PortfolioBacktestHarness {
               tp == null
                   ? BigDecimal.ZERO
                   : tp.targetWeight().multiply(allocatedCapital, IndicatorMath.MC);
+          // `current` is still used below purely as informational text in the synthesised
+          // signal's explanation -- the trigger decision compares against `lastDesired`, never
+          // the RM-capped `current`. See lastDesired's field comment for why.
           BigDecimal current = lastNotional.getOrDefault(symbol, BigDecimal.ZERO);
-          BigDecimal delta = desired.subtract(current, IndicatorMath.MC).abs();
+          BigDecimal previousDesired = lastDesired.getOrDefault(symbol, BigDecimal.ZERO);
+          BigDecimal delta = desired.subtract(previousDesired, IndicatorMath.MC).abs();
           if (delta.compareTo(noTradeBandNotional) <= 0) {
             noTradeBandSkips++;
             continue;
@@ -1208,6 +1250,8 @@ public final class PortfolioBacktestHarness {
             ExecutionDecision decision = rm.gate(openSignal, startOfBarState, symbolCtx);
             if (decision instanceof ExecutionDecision.Execute exec) {
               opensToApply.add(new PendingOpen(symbol, wantsCarry, exec));
+              // Raw, pre-scale-down desired -- see the single-leg runTargets's identical comment.
+              desiredBySymbol.put(symbol, desired);
             } else {
               rmRefusals++;
               ExecutionDecision.Refuse refuse = (ExecutionDecision.Refuse) decision;
@@ -1235,6 +1279,7 @@ public final class PortfolioBacktestHarness {
             totalFeesPaid = totalFeesPaid.add(outcome.feesPaid(), IndicatorMath.MC);
             carryPositions.remove(pc.symbol());
             lastNotional.remove(pc.symbol());
+            lastDesired.remove(pc.symbol());
           } else {
             SymbolPosition pos = positions.get(pc.symbol());
             BigDecimal exitPrice = lastCandle.get(pc.symbol()).close();
@@ -1254,6 +1299,7 @@ public final class PortfolioBacktestHarness {
                     tradesBySymbol.get(pc.symbol()));
             positions.remove(pc.symbol());
             lastNotional.remove(pc.symbol());
+            lastDesired.remove(pc.symbol());
           }
         }
 
@@ -1314,6 +1360,7 @@ public final class PortfolioBacktestHarness {
                   new PortfolioFundingArbHarnessV2.OpenPosition(
                       q, spot.close(), perp.close(), margin, cashBeforeEntry, t, 0));
               lastNotional.put(po.symbol(), q.multiply(perp.close(), IndicatorMath.MC));
+              lastDesired.put(po.symbol(), desiredBySymbol.get(po.symbol()));
               totalFeesPaid =
                   totalFeesPaid.add(
                       spotEntryFee.add(perpEntryFee, IndicatorMath.MC), IndicatorMath.MC);
@@ -1328,6 +1375,7 @@ public final class PortfolioBacktestHarness {
               positions.put(
                   po.symbol(), new SymbolPosition(scaledSize, candle.close(), t, cashBeforeEntry));
               lastNotional.put(po.symbol(), scaledNotional);
+              lastDesired.put(po.symbol(), desiredBySymbol.get(po.symbol()));
               totalFeesPaid = totalFeesPaid.add(entryFee, IndicatorMath.MC);
             }
           }
