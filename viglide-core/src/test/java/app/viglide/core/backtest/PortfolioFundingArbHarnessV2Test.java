@@ -306,6 +306,21 @@ class PortfolioFundingArbHarnessV2Test {
     assertThat(result.trades().get(0).exitReason()).isEqualTo(ExitReason.LIQUIDATION_GUARD);
     assertThat(((Number) result.diagnostics().get("liquidations")).longValue()).isEqualTo(1L);
     assertThat(((Number) result.diagnostics().get("trades.BBB")).longValue()).isEqualTo(0L);
+
+    // PLAN-019 Task A: per-event liquidation attribution (symbol, time, book context) — the
+    // aggregate "liquidations" counter alone can't answer the triage's per-event questions.
+    @SuppressWarnings("unchecked")
+    List<LiquidationEvent> events =
+        (List<LiquidationEvent>) result.diagnostics().get("liquidationEvents");
+    assertThat(events).hasSize(1);
+    LiquidationEvent event = events.get(0);
+    assertThat(event.symbol()).isEqualTo("AAA");
+    assertThat(event.perpLoss()).isGreaterThanOrEqualTo(event.marginThreshold());
+    assertThat(event.overshoot())
+        .isEqualByComparingTo(event.perpLoss().subtract(event.marginThreshold()));
+    // BBB never traded, so the book at liquidation is AAA's notional alone.
+    assertThat(event.bookNotionalAtLiquidation())
+        .isEqualByComparingTo(new BigDecimal("50").multiply(rampCloses[4]));
   }
 
   // ── Test 4: sub-bar realism reused correctly in the portfolio context ───────────────────────
