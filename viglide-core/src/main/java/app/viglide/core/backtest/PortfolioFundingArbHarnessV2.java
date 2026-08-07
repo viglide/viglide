@@ -610,7 +610,12 @@ public final class PortfolioFundingArbHarnessV2 {
         rm);
   }
 
-  private static BigDecimal computeEquity(
+  /**
+   * Package-private (PLAN-019 Task C): {@link PortfolioBacktestHarness}'s two-leg {@code
+   * runTargets} overload reuses this exact mark-to-market formula rather than re-deriving it, so
+   * the two harnesses cannot silently disagree on what a carry position is worth mid-book.
+   */
+  static BigDecimal computeEquity(
       BigDecimal cash,
       Map<String, OpenPosition> positions,
       Map<String, Candle> lastPerp,
@@ -642,8 +647,12 @@ public final class PortfolioFundingArbHarnessV2 {
     return (double) wins / trades.size();
   }
 
-  /** Open two-leg position state: quantity, both legs' entry prices, and the liquidation margin. */
-  private record OpenPosition(
+  /**
+   * Open two-leg position state: quantity, both legs' entry prices, and the liquidation margin.
+   * Package-private (PLAN-019 Task C) — {@link PortfolioBacktestHarness}'s two-leg {@code
+   * runTargets} overload shares this exact type rather than a re-declared lookalike.
+   */
+  record OpenPosition(
       BigDecimal q,
       BigDecimal spotEntry,
       BigDecimal perpEntry,
@@ -652,12 +661,14 @@ public final class PortfolioFundingArbHarnessV2 {
       Instant entryTime,
       int entryBarIndex) {}
 
-  private record CloseOutcome(BigDecimal cash, Trade trade, BigDecimal feesPaid) {}
+  /** Package-private (PLAN-019 Task C) — see {@link OpenPosition}. */
+  record CloseOutcome(BigDecimal cash, Trade trade, BigDecimal feesPaid) {}
 
   /**
    * Closes the position, realising the spot sale, the perp buy-back P&amp;L, and both exit fees.
+   * Package-private (PLAN-019 Task C) — see {@link OpenPosition}.
    */
-  private static CloseOutcome close(
+  static CloseOutcome close(
       BigDecimal cash,
       OpenPosition position,
       BigDecimal spotClose,
