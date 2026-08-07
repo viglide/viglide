@@ -74,4 +74,22 @@ class CsvFundingReaderTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("malformed funding CSV row");
   }
+
+  @Test
+  void microsecondEpochParsesToTheSameInstantAsMilliseconds(@TempDir Path dir) throws IOException {
+    // This reader used to carry its own ms-only timestamp parser while CsvKlineReader handled µs
+    // too. A µs-format funding dump therefore parsed to a year-56000 timestamp, sorted after every
+    // candle, and silently accrued no funding at all. Both readers now share CsvTimestamps.
+    Path micros = dir.resolve("micros.csv");
+    Files.writeString(micros, "1748764800000000,8,0.0001\n");
+    Path millis = dir.resolve("millis.csv");
+    Files.writeString(millis, "1748764800000,8,0.0001\n");
+    try (var us = CsvFundingReader.stream(micros);
+        var ms = CsvFundingReader.stream(millis)) {
+      List<FundingEvent> fromMicros = us.toList();
+      List<FundingEvent> fromMillis = ms.toList();
+      assertThat(fromMicros).hasSize(1);
+      assertThat(fromMicros.getFirst().time()).isEqualTo(fromMillis.getFirst().time());
+    }
+  }
 }

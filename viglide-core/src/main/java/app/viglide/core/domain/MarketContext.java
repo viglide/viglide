@@ -15,6 +15,15 @@ import java.util.Optional;
  * 3-argument constructor defaults it to an empty list so existing strategy code stays
  * source-compatible.
  *
+ * <p>{@code premiumIndexHistory} optionally carries premium-index samples observable up to this
+ * context's {@code asOf} (PLAN-015 Task C) — a continuously-observable nowcast of the next funding
+ * settlement, distinct from {@code fundingHistory}'s already-settled events. Empty for every
+ * pre-existing caller; only a funding-nowcast strategy reads it. Kept as its own field rather than
+ * merged into {@code fundingHistory} because a backtest harness must keep real settlement accrual
+ * (which only ever fires on an actual {@link FundingEvent}) separate from what a strategy is shown
+ * for its own decision-making — conflating the two would let a densely-sampled premium series be
+ * mistaken for that many real cash-settling events.
+ *
  * <p>{@code lastAtr} optionally carries an ATR(14) value the caller already computed for this bar
  * (F11, PLAN-007 Task D) — {@link app.viglide.core.risk.RiskManager} prefers it over recomputing
  * from scratch on every gate call. Empty when the caller has none; strategies are unaffected unless
@@ -31,33 +40,50 @@ public record MarketContext(
     CandleInterval interval,
     List<Candle> candles,
     List<FundingEvent> fundingHistory,
+    List<PremiumIndexEvent> premiumIndexHistory,
     Optional<BigDecimal> lastAtr,
     Optional<ExchangeFilters> exchangeFilters) {
 
   /**
    * Validates and defensively copies the lists so callers cannot mutate them after construction.
    * Requires strictly monotonic {@code openTime} on candles to rule out duplicate or out-of-order
-   * bars before they corrupt indicator calculations. {@code fundingHistory} is copied but not
-   * validated for ordering — most strategies only inspect the tail; ordering is the data layer's
-   * responsibility.
+   * bars before they corrupt indicator calculations. {@code fundingHistory}/{@code
+   * premiumIndexHistory} are copied but not validated for ordering — most strategies only inspect
+   * the tail; ordering is the data layer's responsibility.
    */
   public MarketContext {
     Objects.requireNonNull(symbol, "symbol");
     Objects.requireNonNull(interval, "interval");
     Objects.requireNonNull(candles, "candles");
     Objects.requireNonNull(fundingHistory, "fundingHistory");
+    Objects.requireNonNull(premiumIndexHistory, "premiumIndexHistory");
     Objects.requireNonNull(lastAtr, "lastAtr");
     Objects.requireNonNull(exchangeFilters, "exchangeFilters");
     if (symbol.isBlank()) throw new IllegalArgumentException("symbol must not be blank");
     if (candles.isEmpty()) throw new IllegalArgumentException("candles must not be empty");
     candles = List.copyOf(candles);
     fundingHistory = List.copyOf(fundingHistory);
+    premiumIndexHistory = List.copyOf(premiumIndexHistory);
     for (int i = 1; i < candles.size(); i++) {
       if (!candles.get(i).openTime().isAfter(candles.get(i - 1).openTime())) {
         throw new IllegalArgumentException(
             "candles must have strictly increasing openTime at index " + i);
       }
     }
+  }
+
+  /**
+   * Backward-compatible 6-argument constructor for callers that predate {@link
+   * #premiumIndexHistory()} (PLAN-015 Task C). Defaults it to an empty list.
+   */
+  public MarketContext(
+      String symbol,
+      CandleInterval interval,
+      List<Candle> candles,
+      List<FundingEvent> fundingHistory,
+      Optional<BigDecimal> lastAtr,
+      Optional<ExchangeFilters> exchangeFilters) {
+    this(symbol, interval, candles, fundingHistory, List.of(), lastAtr, exchangeFilters);
   }
 
   /**

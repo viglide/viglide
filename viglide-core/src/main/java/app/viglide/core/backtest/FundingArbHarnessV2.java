@@ -5,6 +5,7 @@ import app.viglide.core.domain.CandleInterval;
 import app.viglide.core.domain.Direction;
 import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.MarketContext;
+import app.viglide.core.domain.PremiumIndexEvent;
 import app.viglide.core.domain.TechnicalSignal;
 import app.viglide.core.indicator.IndicatorMath;
 import app.viglide.core.risk.CircuitBreaker;
@@ -13,6 +14,7 @@ import app.viglide.core.risk.PortfolioState;
 import app.viglide.core.risk.RiskManagerPort;
 import app.viglide.core.spi.TradingStrategy;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -63,6 +65,18 @@ public final class FundingArbHarnessV2 {
    */
   private static final BigDecimal DEFAULT_LEVERAGE = new BigDecimal("2.0");
 
+  /**
+   * Hard cap on the premium-index window handed to a strategy (PLAN-015 Task C) — 24h of 1-minute
+   * samples, comfortably more than the 8h funding interval a nowcast needs. Named per CLAUDE.md §5.
+   *
+   * <p>Unlike {@code fundingWindow}, this one <em>must</em> be bounded: the window is deep-copied
+   * into every evaluated bar's {@link MarketContext}, so letting it grow for the whole run makes
+   * the harness quadratic in bar count. Funding gets away with it at 3 events/day; a 1-minute
+   * premium series is ~175x denser, and an uncapped 1-year run costs ~2.3e9 element copies per
+   * symbol. A strategy needing a longer lookback should pre-aggregate rather than raise this.
+   */
+  static final int PREMIUM_INDEX_WINDOW_MAX_SAMPLES = 1440;
+
   private FundingArbHarnessV2() {}
 
   /**
@@ -91,6 +105,7 @@ public final class FundingArbHarnessV2 {
       List<Candle> perpCandles,
       List<Candle> spotCandles,
       List<FundingEvent> fundingEvents,
+      List<PremiumIndexEvent> premiumIndexEvents,
       String symbol,
       CandleInterval interval,
       BacktestConfig cfg,
@@ -100,11 +115,13 @@ public final class FundingArbHarnessV2 {
     Objects.requireNonNull(perpCandles, "perpCandles");
     Objects.requireNonNull(spotCandles, "spotCandles");
     Objects.requireNonNull(fundingEvents, "fundingEvents");
+    Objects.requireNonNull(premiumIndexEvents, "premiumIndexEvents");
     Objects.requireNonNull(symbol, "symbol");
     Objects.requireNonNull(interval, "interval");
     Objects.requireNonNull(cfg, "cfg");
     Objects.requireNonNull(rm, "rm");
     Objects.requireNonNull(perpSubBarCandles, "perpSubBarCandles");
+    validatePremiumIndexSeries(premiumIndexEvents, interval, symbol);
 
     Map<Instant, Candle> spotByOpenTime = new HashMap<>(spotCandles.size() * 2);
     for (Candle c : spotCandles) {
@@ -125,8 +142,10 @@ public final class FundingArbHarnessV2 {
     List<Refusal> refusals = new ArrayList<>();
     Deque<Candle> window = new ArrayDeque<>(cfg.warmupBars());
     Deque<FundingEvent> fundingWindow = new ArrayDeque<>();
+    Deque<PremiumIndexEvent> premiumIndexWindow = new ArrayDeque<>();
 
     int fundingIdx = 0;
+    int premiumIndexIdx = 0;
     int subBarIdx = 0;
     int barIndex = 0;
     long evaluations = 0;
@@ -169,6 +188,21 @@ public final class FundingArbHarnessV2 {
           cash = cash.add(funding);
           netFundingAccrued = netFundingAccrued.add(funding);
         }
+      }
+
+      // 1a. Premium-index nowcast window: drain samples up to this bar's openTime, same
+      // monotonic-cursor no-lookahead pattern as the funding drain above — this is windowing only,
+      // it never touches cash (see MarketContext.premiumIndexHistory's Javadoc for why the two
+      // channels must stay separate).
+      while (premiumIndexIdx < premiumIndexEvents.size()
+          && !premiumIndexEvents.get(premiumIndexIdx).time().isAfter(perp.openTime())) {
+        premiumIndexWindow.addLast(premiumIndexEvents.get(premiumIndexIdx++));
+      }
+      // Evict from the head, never the tail: a nowcast reads the most recent samples, and an
+      // unbounded window would be copied into every bar's MarketContext (see
+      // PREMIUM_INDEX_WINDOW_MAX_SAMPLES).
+      while (premiumIndexWindow.size() > PREMIUM_INDEX_WINDOW_MAX_SAMPLES) {
+        premiumIndexWindow.pollFirst();
       }
 
       // 1b. Slice perp sub-bars (if any) covering this bar's window — same monotonic-cursor
@@ -276,6 +310,7 @@ public final class FundingArbHarnessV2 {
                 interval,
                 new ArrayList<>(window),
                 new ArrayList<>(fundingWindow),
+                new ArrayList<>(premiumIndexWindow),
                 Optional.empty(),
                 cfg.exchangeFilters());
         Optional<TechnicalSignal> sig = strategy.evaluate(ctx);
@@ -402,6 +437,7 @@ public final class FundingArbHarnessV2 {
     diag.put("signals", signals);
     diag.put("bars", (long) equityCurve.size());
     diag.put("fundingEvents", (long) fundingEvents.size());
+    diag.put("premiumIndexEvents", (long) premiumIndexEvents.size());
     diag.put("barsSkippedNoSpotMatch", barsSkippedNoSpotMatch);
     diag.put("liquidations", liquidations);
     diag.put("model", "funding-arb-v2");
@@ -425,6 +461,35 @@ public final class FundingArbHarnessV2 {
         equityCurve,
         diag,
         refusals);
+  }
+
+  /**
+   * Backward-compatible overload predating {@link #run(TradingStrategy, List, List, List, List,
+   * String, CandleInterval, BacktestConfig, Optional, List)}'s premium-index parameter (PLAN-015
+   * Task C). Defaults it to empty — every caller that hasn't opted into the nowcast series keeps
+   * seeing an identical, unaffected run.
+   */
+  public static BacktestResult run(
+      TradingStrategy strategy,
+      List<Candle> perpCandles,
+      List<Candle> spotCandles,
+      List<FundingEvent> fundingEvents,
+      String symbol,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      Optional<RiskManagerPort> rm,
+      List<Candle> perpSubBarCandles) {
+    return run(
+        strategy,
+        perpCandles,
+        spotCandles,
+        fundingEvents,
+        List.of(),
+        symbol,
+        interval,
+        cfg,
+        rm,
+        perpSubBarCandles);
   }
 
   /** Overload with an RM but no perp sub-bars (original close-only liquidation-guard timing). */
@@ -460,6 +525,71 @@ public final class FundingArbHarnessV2 {
         cfg,
         Optional.empty(),
         List.of());
+  }
+
+  /**
+   * Data-integrity guard for the premium-index series (PLAN-015 Task C), checked once per run
+   * rather than per bar. Two distinct defects, both of which would otherwise mis-backtest in
+   * silence — fail loudly instead (CLAUDE.md §5):
+   *
+   * <ul>
+   *   <li><b>Sampling coarser than the bars.</b> A premium-index row is stamped with its kline's
+   *       <em>open</em> time but carries that kline's <em>close</em> value, so the value only
+   *       becomes observable at {@code openTime + samplingInterval}. The window drain admits rows
+   *       at or before the decision bar's {@code openTime}, and the strategy is shown that bar's
+   *       own close — so the series is lookahead-free exactly while it is sampled at least as
+   *       finely as the bars. Sample a 4h premium series against 1h bars and a strategy silently
+   *       sees three hours into the future, with every no-lookahead test still green.
+   *   <li><b>Out-of-order input.</b> The drain is a monotonic cursor, so the first inversion stops
+   *       it advancing and every later sample is silently dropped — while {@code
+   *       diag.premiumIndexEvents} still reports the full input size. {@link
+   *       app.viglide.core.data.CsvPremiumIndexReader} is explicitly built to tolerate merged
+   *       multi-month dumps, which makes mis-ordered concatenation a realistic input.
+   * </ul>
+   *
+   * <p>Cadence is estimated as the <em>minimum</em> positive gap, not the first or the maximum:
+   * real Binance dumps have holes, which inflate individual gaps, so the minimum is the only
+   * estimator that does not false-positive on a gappy but correctly-sampled series.
+   *
+   * <p>Package-private: {@link PortfolioFundingArbHarnessV2} reuses this exact guard per symbol
+   * rather than duplicating it.
+   */
+  static void validatePremiumIndexSeries(
+      List<PremiumIndexEvent> events, CandleInterval interval, String symbol) {
+    if (events.size() < 2) return;
+    Duration minGap = null;
+    for (int i = 1; i < events.size(); i++) {
+      Duration gap = Duration.between(events.get(i - 1).time(), events.get(i).time());
+      if (gap.isNegative()) {
+        throw new IllegalArgumentException(
+            "premium-index series for "
+                + symbol
+                + " is not in ascending time order at index "
+                + i
+                + " ("
+                + events.get(i - 1).time()
+                + " then "
+                + events.get(i).time()
+                + ") — the harness drains it with a monotonic cursor and would silently drop"
+                + " every later sample");
+      }
+      if (gap.isZero()) continue;
+      if (minGap == null || gap.compareTo(minGap) < 0) minGap = gap;
+    }
+    if (minGap != null && minGap.compareTo(interval.duration()) > 0) {
+      throw new IllegalArgumentException(
+          "premium-index series for "
+              + symbol
+              + " is sampled every "
+              + minGap
+              + ", coarser than the "
+              + interval.duration()
+              + " decision bar — each sample carries its kline's close value, which would only"
+              + " become observable after the bar it is shown to (lookahead). Re-download"
+              + " premium-index klines at "
+              + interval
+              + " or finer");
+    }
   }
 
   /**
