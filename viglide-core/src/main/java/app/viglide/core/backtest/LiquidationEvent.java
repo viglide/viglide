@@ -5,10 +5,10 @@ import java.time.Instant;
 import java.util.Objects;
 
 /**
- * One forced close by {@link PortfolioFundingArbHarnessV2}'s per-symbol liquidation guard
- * (PLAN-019 Task A — liquidation-rate triage needs per-event attribution that {@link
- * BacktestResult#trades()} alone cannot give, since {@link Trade} carries no symbol). Surfaced via
- * {@code diagnostics().get("liquidationEvents")}, purely additive — existing callers reading other
+ * One forced close by {@link PortfolioFundingArbHarnessV2}'s per-symbol liquidation guard (PLAN-019
+ * Task A — liquidation-rate triage needs per-event attribution that {@link BacktestResult#trades()}
+ * alone cannot give, since {@link Trade} carries no symbol). Surfaced via {@code
+ * diagnostics().get("liquidationEvents")}, purely additive — existing callers reading other
  * diagnostics keys are unaffected.
  *
  * @param symbol the position that was liquidated
