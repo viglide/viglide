@@ -19,14 +19,26 @@ public record PortfolioCalibrationResult(
     int cvTradeCountTotal,
     int foldsEvaluated,
     BigDecimal cvReturnOnDeployedCapitalPooled,
-    double cvUlcerIndexMedian) {
+    double cvUlcerIndexMedian,
+    Map<String, Integer> carryEligibilityGapsBySymbol) {
 
+  /**
+   * @param carryEligibilityGapsBySymbol PLAN-022 Task C (N1): number of folds, per symbol, where
+   *     that symbol had an overall spot series declared but this fold's own slice of it came up
+   *     empty (a data gap), so the fold ran it single-leg-eligible instead of silently registering
+   *     it carry-capable with no actual spot bars. Empty map means no such gap occurred anywhere in
+   *     this run — the common case. Visible here, not only in {@code
+   *     BacktestResult#diagnostics()}'s per-fold {@code barsSkipped.<SYMBOL>}, which this harness
+   *     never surfaces at all.
+   */
   public PortfolioCalibrationResult {
     Objects.requireNonNull(params, "params");
     Objects.requireNonNull(cvTotalReturnMedian, "cvTotalReturnMedian");
     Objects.requireNonNull(cvMaxDrawdownWorst, "cvMaxDrawdownWorst");
     Objects.requireNonNull(cvReturnOnDeployedCapitalPooled, "cvReturnOnDeployedCapitalPooled");
+    Objects.requireNonNull(carryEligibilityGapsBySymbol, "carryEligibilityGapsBySymbol");
     params = Map.copyOf(new LinkedHashMap<>(params));
+    carryEligibilityGapsBySymbol = Map.copyOf(new LinkedHashMap<>(carryEligibilityGapsBySymbol));
     if (foldsEvaluated < 1) {
       throw new IllegalArgumentException("foldsEvaluated must be >= 1");
     }

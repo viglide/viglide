@@ -16,6 +16,7 @@ import app.viglide.core.risk.RiskParameters;
 import app.viglide.core.spi.PortfolioStrategy;
 import app.viglide.core.spi.StrategyMetadata;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -436,6 +437,265 @@ class PortfolioCalibrationHarnessTest {
     // The effective leverage that shaped the run is auditable from the output alone.
     assertThat(at2x.get(0).params().get("maxLeverage")).isEqualTo(new BigDecimal("2.0"));
     assertThat(at1x.get(0).params().get("maxLeverage")).isEqualTo(new BigDecimal("1.0"));
+  }
+
+  // ── PLAN-022 Task A: timeBudget / checkpointEvery / resume-determinism ───────────────────────
+
+  @Test
+  void run_zeroTimeBudget_truncatesImmediately_visibleAsZeroTrials_notSilent() {
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    List<Candle> spot = alternatingCandles(80);
+    Map<String, List<FundingEvent>> funding = Map.of(symbol, fundingEvery(80, 2));
+    BacktestConfig cfg = smallCapCfg();
+    List<PortfolioCandidate> candidates =
+        List.of(candidate(symbol, 2, "c0"), candidate(symbol, 3, "c1"));
+
+    PortfolioCalibrationRun truncated =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            4,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates,
+            PortfolioScoringFunction.CARRY_YIELD,
+            RiskParameters.defaults(),
+            Duration.ZERO,
+            null,
+            25);
+
+    // A cutoff before any candidate finishes must read as zero trials, not silently rank an
+    // empty/partial sweep as if it were complete.
+    assertThat(truncated.trials()).isZero();
+    assertThat(truncated.survivors()).isEmpty();
+
+    PortfolioCalibrationRun full =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            4,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates,
+            PortfolioScoringFunction.CARRY_YIELD,
+            RiskParameters.defaults(),
+            Duration.ofMinutes(5),
+            null,
+            25);
+
+    assertThat(full.trials()).isEqualTo(candidates.size());
+  }
+
+  @Test
+  void run_checkpointEveryBelowOne_rejectedUpFront_notAsArithmeticExceptionMidSweep() {
+    String symbol = "AAA";
+
+    // The bare `evaluated % checkpointEvery` would instead throw ArithmeticException from inside
+    // the candidate loop -- i.e. only after the first candidate had already been evaluated, which
+    // against the real corpus is hours in, discarding the whole sweep.
+    assertThatThrownBy(
+            () ->
+                PortfolioCalibrationHarness.run(
+                    Map.of(symbol, alternatingCandles(80)),
+                    Map.of(symbol, fundingEvery(80, 2)),
+                    Map.of(symbol, alternatingCandles(80)),
+                    4,
+                    0,
+                    0,
+                    CandleInterval.ONE_HOUR,
+                    smallCapCfg(),
+                    new BigDecimal("10000"),
+                    new BigDecimal("0.05"),
+                    List.of(candidate(symbol, 2, "c0")),
+                    PortfolioScoringFunction.CARRY_YIELD,
+                    RiskParameters.defaults(),
+                    null,
+                    null,
+                    0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("checkpointEvery");
+  }
+
+  @Test
+  void run_progressConsumer_emitsStartAndFinishLines() {
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    List<Candle> spot = alternatingCandles(80);
+    Map<String, List<FundingEvent>> funding = Map.of(symbol, fundingEvery(80, 2));
+    BacktestConfig cfg = smallCapCfg();
+    List<PortfolioCandidate> candidates = List.of(candidate(symbol, 2, "c0"));
+    List<String> lines = new ArrayList<>();
+
+    PortfolioCalibrationHarness.run(
+        Map.of(symbol, perp),
+        funding,
+        Map.of(symbol, spot),
+        4,
+        0,
+        0,
+        CandleInterval.ONE_HOUR,
+        cfg,
+        new BigDecimal("10000"),
+        new BigDecimal("0.05"),
+        candidates,
+        PortfolioScoringFunction.CARRY_YIELD,
+        RiskParameters.defaults(),
+        null,
+        lines::add,
+        1);
+
+    assertThat(lines).isNotEmpty();
+    assertThat(lines.get(0)).contains("started");
+    assertThat(lines.get(lines.size() - 1)).contains("finished");
+  }
+
+  @Test
+  void run_interruptedAfterNCandidates_resumedOverRemainder_matchesStraightThroughRanking() {
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    List<Candle> spot = alternatingCandles(80);
+    Map<String, List<FundingEvent>> funding = Map.of(symbol, fundingEvery(80, 2));
+    BacktestConfig cfg = smallCapCfg();
+    List<PortfolioCandidate> candidates =
+        List.of(
+            candidate(symbol, 2, "c0"),
+            candidate(symbol, 3, "c1"),
+            candidate(symbol, 4, "c2"),
+            candidate(symbol, 5, "c3"),
+            candidate(symbol, 6, "c4"));
+
+    List<PortfolioCalibrationResult> straightThrough =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            4,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates,
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    // Simulate a crash after the first n candidates: evaluate only the prefix, then evaluate only
+    // the remainder in a second, independent call -- exactly what a resumed process would do,
+    // having recorded (from the first call's own trials count) where it left off.
+    int n = 2;
+    List<PortfolioCalibrationResult> firstPart =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            4,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates.subList(0, n),
+            PortfolioScoringFunction.CARRY_YIELD);
+    List<PortfolioCalibrationResult> resumedRemainder =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            4,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates.subList(n, candidates.size()),
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    List<PortfolioCalibrationResult> merged = new ArrayList<>(firstPart);
+    merged.addAll(resumedRemainder);
+    List<PortfolioCalibrationResult> reRanked =
+        PortfolioCalibrationHarness.rank(merged, PortfolioScoringFunction.CARRY_YIELD);
+
+    assertThat(reRanked).isEqualTo(straightThrough);
+  }
+
+  // ── PLAN-022 Task C (N1): a fold's own empty spot slice must not be silently carry-registered ──
+
+  @Test
+  void emptySpotSliceInOneFold_recordedInResult_symbolKeptSingleLegForThatFold() {
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    // Covers only bars [0,24] -- fold 1 (folds=2, warmupBars=15) combines perp indices [25,80),
+    // which this spot series never overlaps, so fold 1's own slice comes up empty.
+    List<Candle> spot = alternatingCandles(25);
+    BacktestConfig cfg = smallCapCfg();
+    PortfolioCandidate neverTrades =
+        new PortfolioCandidate(new NeverTradesStrategy(), Map.of("variant", "never"));
+
+    List<PortfolioCalibrationResult> results =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            Map.of(symbol, fundingEvery(80, 2)),
+            Map.of(symbol, spot),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            List.of(neverTrades),
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    assertThat(results).hasSize(1);
+    // Visible in the result itself -- not only in BacktestResult#diagnostics()'s barsSkipped,
+    // which this harness never even reads.
+    assertThat(results.get(0).carryEligibilityGapsBySymbol()).containsEntry(symbol, 1);
+  }
+
+  @Test
+  void emptySpotSliceInOneFold_strategyStillTargetsCarry_failsLoudInsteadOfSilentlyWrong() {
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    List<Candle> spot = alternatingCandles(25);
+    BacktestConfig cfg = smallCapCfg();
+    List<PortfolioCandidate> candidates =
+        List.of(
+            new PortfolioCandidate(new ConstantCarryStrategy(symbol), Map.of("variant", "always")));
+
+    // Before this fix: the fold silently re-registered "AAA" carry-capable with zero spot bars,
+    // so every bar was skipped via barsSkipped and the fold quietly contributed nothing to the
+    // score. After this fix: the fold correctly no longer declares "AAA" carry-capable, and a
+    // strategy that still targets it that way is rejected loudly instead of being misrepresented.
+    assertThatThrownBy(
+            () ->
+                PortfolioCalibrationHarness.run(
+                    Map.of(symbol, perp),
+                    Map.of(symbol, fundingEvery(80, 2)),
+                    Map.of(symbol, spot),
+                    2,
+                    0,
+                    0,
+                    CandleInterval.ONE_HOUR,
+                    cfg,
+                    new BigDecimal("10000"),
+                    new BigDecimal("0.05"),
+                    candidates,
+                    PortfolioScoringFunction.CARRY_YIELD))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("DELTA_NEUTRAL_CARRY");
   }
 
   private static RiskParameters withLeverage(RiskParameters base, BigDecimal maxLeverage) {
