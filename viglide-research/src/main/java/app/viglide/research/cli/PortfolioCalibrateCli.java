@@ -15,6 +15,7 @@ import app.viglide.research.calibrate.PortfolioCalibrationHarness;
 import app.viglide.research.calibrate.PortfolioCalibrationResult;
 import app.viglide.research.calibrate.PortfolioCalibrationRun;
 import app.viglide.research.calibrate.PortfolioScoringFunction;
+import app.viglide.research.calibrate.TrialRegistry;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.file.Files;
@@ -139,6 +140,7 @@ public final class PortfolioCalibrateCli {
     Map<String, List<Candle>> candlesBySymbol = new LinkedHashMap<>();
     Map<String, List<FundingEvent>> fundingBySymbol = new LinkedHashMap<>();
     Map<String, List<Candle>> spotBySymbol = new LinkedHashMap<>();
+    Map<String, List<Path>> datasetsBySymbol = new LinkedHashMap<>();
     List<String> included = new ArrayList<>();
     List<String> skipped = new ArrayList<>();
 
@@ -175,6 +177,7 @@ public final class PortfolioCalibrateCli {
       candlesBySymbol.put(pair, candles);
       fundingBySymbol.put(pair, funding);
       spotBySymbol.put(pair, spot);
+      datasetsBySymbol.put(pair, List.of(klinePath, fundingPath, spotPath));
       included.add(pair);
     }
 
@@ -212,7 +215,17 @@ public final class PortfolioCalibrateCli {
     // leave an abort looking like a finished sweep -- the exact silence PLAN-022 Task A exists to
     // remove.
     writeManifest(
-        outDir, args, strategyName, included, skipped, 0, seed, searchMode, candidates.size());
+        outDir,
+        args,
+        strategyName,
+        included,
+        skipped,
+        0,
+        seed,
+        searchMode,
+        candidates.size(),
+        null,
+        0);
 
     try (var writer =
         Files.newBufferedWriter(
@@ -248,6 +261,29 @@ public final class PortfolioCalibrateCli {
               progress,
               checkpointEvery);
 
+      // PLAN-023 Task D. This call is the whole reason that task exists: PLAN-022 shipped this CLI
+      // without it, so the 2026-08-10 Stage 2 carry runs spent 720 real-corpus candidate
+      // evaluations and recorded none, leaving DSR deflation for the carry half un-chargeable.
+      // PortfolioCalibrationHarness deliberately leaves the registry call "to whichever caller
+      // knows the dataset fingerprint" (its own Javadoc) -- this is that caller.
+      Path trialRegistryPath = Paths.get(Args.opt(args, "trial-registry", "research-trials.jsonl"));
+      String datasetFingerprint =
+          TrialRegistry.panelFingerprint(included, interval.name(), datasetsBySymbol);
+      TrialRegistry.append(
+          trialRegistryPath,
+          new TrialRegistry.TrialRecord(
+              Instant.now(),
+              strategyName,
+              datasetFingerprint,
+              run.trials(),
+              seed,
+              Args.opt(args, "objective", "carry-yield")));
+      int cumulativeTrials =
+          TrialRegistry.cumulativeTrialsFor(trialRegistryPath, datasetFingerprint);
+      System.out.printf(
+          "trial registry: this run=%d candidates, cumulative for this panel=%d (%s, fingerprint %s)%n",
+          run.trials(), cumulativeTrials, trialRegistryPath, datasetFingerprint);
+
       writeManifest(
           outDir,
           args,
@@ -257,7 +293,9 @@ public final class PortfolioCalibrateCli {
           run.trials(),
           seed,
           searchMode,
-          candidates.size());
+          candidates.size(),
+          datasetFingerprint,
+          cumulativeTrials);
       writeTop(outDir, run.survivors(), topK, scoringFunction);
       System.out.println(
           String.format(
@@ -282,7 +320,9 @@ public final class PortfolioCalibrateCli {
       int trials,
       long seed,
       String searchMode,
-      int candidatesRequested)
+      int candidatesRequested,
+      String datasetFingerprint,
+      int cumulativeTrials)
       throws IOException {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("startedAt", Instant.now().toString());
@@ -297,6 +337,10 @@ public final class PortfolioCalibrateCli {
     // reported as a completed one (PLAN-022 Task A).
     m.put("candidatesRequested", candidatesRequested);
     m.put("trials", trials);
+    // PLAN-023 Task D: which data these trials were spent against, and the cumulative count DSR
+    // must be deflated by -- null/0 in the pre-run placeholder, real once the run has finished.
+    m.put("datasetFingerprint", datasetFingerprint);
+    m.put("cumulativeTrialsForPanel", cumulativeTrials);
     m.put("objective", Args.opt(args, "objective", "carry-yield"));
     Map<String, Object> argMap = new LinkedHashMap<>(args);
     m.put("args", argMap);
