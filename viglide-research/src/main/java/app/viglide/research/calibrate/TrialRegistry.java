@@ -12,9 +12,11 @@ import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
 
 /**
  * Cumulative, append-only record of every calibration run ever made against a given dataset
@@ -54,6 +56,45 @@ public final class TrialRegistry {
     } catch (IOException e) {
       throw new UncheckedIOException("failed to fingerprint dataset " + datasetPath, e);
     }
+  }
+
+  /**
+   * The panel counterpart of {@link #datasetFingerprint} (PLAN-023 Task D): one fingerprint for a
+   * whole cross-sectional universe, so a panel fit's trials accumulate against the dataset
+   * <em>set</em> it actually searched rather than against any single pair inside it.
+   *
+   * <p>Symbols are sorted and each is paired with its own dataset files, themselves sorted, before
+   * hashing — so the fingerprint is invariant to the order pairs happened to be listed on a command
+   * line, exactly as {@link #datasetFingerprint} is invariant to seed and search mode. Adding or
+   * removing a pair, or changing any byte of any file, changes it. That is intended: a fit over 12
+   * pairs and a fit over 11 of them did not search the same data and must not share a trial count.
+   *
+   * @param symbols every symbol in the panel; order does not matter
+   * @param interval the decision interval, as {@code CandleInterval#name()}
+   * @param datasetsBySymbol every dataset file the fit read for each symbol (klines, funding, spot)
+   */
+  public static String panelFingerprint(
+      Collection<String> symbols,
+      String interval,
+      Map<String, ? extends Collection<Path>> datasetsBySymbol) {
+    StringBuilder canonical = new StringBuilder(interval).append('|');
+    for (String symbol : new TreeSet<>(symbols)) {
+      canonical.append(symbol).append('=');
+      Collection<Path> files = datasetsBySymbol.get(symbol);
+      if (files == null) {
+        throw new IllegalArgumentException("no datasets recorded for panel symbol " + symbol);
+      }
+      for (Path p : new TreeSet<>(files)) {
+        try {
+          canonical.append(sha256Hex(Files.readAllBytes(p))).append(',');
+        } catch (IOException e) {
+          throw new UncheckedIOException("failed to fingerprint dataset " + p, e);
+        }
+      }
+      canonical.append(';');
+    }
+    return sha256Hex(canonical.toString().getBytes(StandardCharsets.UTF_8))
+        .substring(0, FINGERPRINT_HEX_CHARS);
   }
 
   /** One completed calibration run, as recorded in the registry. */

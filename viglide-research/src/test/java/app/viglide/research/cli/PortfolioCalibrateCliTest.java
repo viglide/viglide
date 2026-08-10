@@ -104,6 +104,55 @@ class PortfolioCalibrateCliTest {
     assertThat(((Number) manifest.get("candidatesRequested")).intValue()).isEqualTo(2);
   }
 
+  /**
+   * PLAN-023 Task D. PLAN-022 shipped this CLI with no TrialRegistry call at all, so the 2026-08-10
+   * Stage 2 carry runs spent 720 real-corpus candidate evaluations and recorded none, leaving DSR
+   * deflation for the carry half un-chargeable. Nothing in the output of a run reveals that, which
+   * is why it needs its own test rather than an eyeball.
+   */
+  @Test
+  void run_appendsTrialsToTheRegistry_accumulatingAcrossRunsOnOneFingerprint(@TempDir Path tmp)
+      throws IOException {
+    Path datasetsDir = tmp.resolve("data");
+    Files.createDirectories(datasetsDir);
+    Files.writeString(datasetsDir.resolve("AAA_1h_2024.csv"), alternatingCandlesCsv(60));
+    Files.writeString(datasetsDir.resolve("AAA_spot_1h_2024.csv"), alternatingCandlesCsv(60));
+    Files.writeString(datasetsDir.resolve("AAA_funding_2024.csv"), fundingCsv(60));
+    Path registry = tmp.resolve("trials.jsonl");
+    String[] argv = {
+      "--pairs=AAA",
+      "--strategy=fixture-carry-cli",
+      "--label=2024",
+      "--datasets-dir=" + datasetsDir,
+      "--folds=2",
+      "--embargo-bars=0",
+      "--min-trades=0",
+      "--warmup-bars=5",
+      "--trial-registry=" + registry,
+      "--out=" + tmp.resolve("out")
+    };
+
+    PortfolioCalibrateCli.run(argv);
+    PortfolioCalibrateCli.run(argv);
+
+    List<String> lines = Files.readAllLines(registry);
+    assertThat(lines).hasSize(2);
+    @SuppressWarnings("unchecked")
+    Map<String, Object> first = (Map<String, Object>) JsonReader.parse(lines.get(0));
+    @SuppressWarnings("unchecked")
+    Map<String, Object> second = (Map<String, Object>) JsonReader.parse(lines.get(1));
+    // Same data, so the same fingerprint -- otherwise repeated searching would never accumulate.
+    assertThat(second.get("datasetFingerprint")).isEqualTo(first.get("datasetFingerprint"));
+    assertThat(((Number) first.get("candidateCount")).intValue()).isEqualTo(2);
+
+    @SuppressWarnings("unchecked")
+    Map<String, Object> manifest =
+        (Map<String, Object>)
+            JsonReader.parse(Files.readString(tmp.resolve("out").resolve("manifest.json")));
+    assertThat(((Number) manifest.get("cumulativeTrialsForPanel")).intValue()).isEqualTo(4);
+    assertThat(manifest.get("datasetFingerprint")).isEqualTo(first.get("datasetFingerprint"));
+  }
+
   @Test
   void run_missingSpotDataset_skipsPairAndRefuses(@TempDir Path tmp) throws IOException {
     Path datasetsDir = tmp.resolve("data");
