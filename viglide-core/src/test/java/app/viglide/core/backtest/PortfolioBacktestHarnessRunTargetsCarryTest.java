@@ -505,6 +505,80 @@ class PortfolioBacktestHarnessRunTargetsCarryTest {
     assertThat(result.refusals()).isEmpty();
   }
 
+  @Test
+  void liquidatedSymbol_reentersWhenStrategyStillWantsIt() {
+    // PLAN-021 Task A regression test (docs/tasks/PLAN-021-plan019-review-findings.md, Task A).
+    // liquidationGuard_firesForCarryPosition_otherCarrySymbolUnaffected above uses a 0.9 no-trade
+    // band as scaffolding -- wide enough to swallow the very bug this test exists to catch. A
+    // REALISTIC band (0.05) is required to see it: before the fix, the liquidation branch clears
+    // carryPositions and lastNotional but not lastDesired, so the very next bar's desired (the
+    // strategy's target weight never changes) equals the stale lastDesired and delta == 0 -- the
+    // no-trade band swallows re-entry, forever, for the rest of the run.
+    int warmupBars = 5;
+    List<Candle> perpAaa = new ArrayList<>(flatCandles(warmupBars, new BigDecimal("100")));
+    BigDecimal[] rampCloses = {
+      new BigDecimal("110"),
+      new BigDecimal("120"),
+      new BigDecimal("130"),
+      new BigDecimal("140"),
+      new BigDecimal("150")
+    };
+    for (int i = 0; i < rampCloses.length; i++) {
+      Instant t = T0.plus(Duration.ofHours(warmupBars + i));
+      perpAaa.add(
+          new Candle(
+              t, rampCloses[i], rampCloses[i], rampCloses[i], rampCloses[i], BigDecimal.ONE));
+    }
+    // Back to the entry price and flat for the rest of the run: unambiguous, constant demand for a
+    // symbol the book is now flat in, with nothing legitimate left for the no-trade band to
+    // swallow.
+    int postLiquidationBars = 10;
+    for (int i = 0; i < postLiquidationBars; i++) {
+      Instant t = T0.plus(Duration.ofHours(warmupBars + rampCloses.length + i));
+      BigDecimal p = new BigDecimal("100");
+      perpAaa.add(new Candle(t, p, p, p, p, BigDecimal.ONE));
+    }
+    List<Candle> spotAaa = new ArrayList<>();
+    for (Candle c : perpAaa) {
+      spotAaa.add(new Candle(c.openTime(), c.open(), c.high(), c.low(), c.close(), c.volume()));
+    }
+
+    BacktestConfig cfg =
+        new BacktestConfig(
+            new BigDecimal("10000"),
+            FeeModel.zero(),
+            warmupBars,
+            new BigDecimal("1.0"),
+            null,
+            null,
+            8760);
+    RiskManagerPort fixedRm = new FixedNotionalRiskManagerPort(new BigDecimal("5000"));
+
+    BacktestResult result =
+        PortfolioBacktestHarness.runTargets(
+            Map.of("AAA", perpAaa),
+            Map.of("AAA", spotAaa),
+            Map.of(),
+            Map.of(),
+            new ConstantCarryWeightStrategy("AAA", BigDecimal.ONE),
+            CandleInterval.ONE_HOUR,
+            cfg,
+            fixedRm,
+            new BigDecimal("5000"),
+            new BigDecimal("0.05"));
+
+    assertThat(result.diagnostics().get("liquidations")).isEqualTo(1L);
+    assertThat(result.trades().get(0).exitReason()).isEqualTo(ExitReason.LIQUIDATION_GUARD);
+    // The defect this test targets: without the fix, this is the ONLY trade for the entire run --
+    // ten more bars of unambiguous demand for a flat symbol never re-open a position because
+    // lastDesired never cleared.
+    assertThat(result.trades()).hasSizeGreaterThanOrEqualTo(2);
+    Instant liquidationExit = result.trades().get(0).exitTime();
+    assertThat(result.trades().stream().anyMatch(t -> !t.entryTime().isBefore(liquidationExit)))
+        .as("expected a re-entry at or after the liquidation exit, found none")
+        .isTrue();
+  }
+
   // ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
   private static Candle candle(Instant t, double price) {

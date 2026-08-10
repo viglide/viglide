@@ -83,10 +83,13 @@ public final class PortfolioCalibrationHarness {
    *     pass the K1′ floor (30, ADR-0016 condition 2), not the legacy single-symbol default of 10
    * @param allocatedCapital fixed capital base every candidate's {@code targetWeight} is a fraction
    *     of, same meaning as {@link PortfolioBacktestHarness}'s {@code runTargets}
-   * @param noTradeBand the notional no-trade band every candidate is evaluated at — a real
-   *     parameter in this task's own search surface (PLAN-019 Task D), passed once per candidate
-   *     via each {@link PortfolioCandidate#configOverride()} if it needs to vary; this parameter is
-   *     the harness-wide default when a candidate does not override it
+   * @param noTradeBand the harness-wide default notional no-trade band. A real parameter in this
+   *     task's own search surface (PLAN-019 Task D) — to vary it per candidate (e.g. across a
+   *     search grid), set {@link PortfolioCandidate#noTradeBand()} explicitly on that candidate; a
+   *     non-null candidate value takes precedence over this default and is echoed into the
+   *     candidate's {@code paramsSnapshot} under the key {@code "noTradeBand"} (unless the caller
+   *     already put an entry there), so the winning row in {@link PortfolioCalibrationResult} is
+   *     self-describing (PLAN-021 Task B)
    * @param candidates every parameter set to evaluate, already built
    * @param scoringFunction ranks the ranked-descending output; {@link
    *     PortfolioScoringFunction#CARRY_YIELD} is the recommended default, mirroring {@link
@@ -105,6 +108,51 @@ public final class PortfolioCalibrationHarness {
       BigDecimal noTradeBand,
       List<PortfolioCandidate> candidates,
       PortfolioScoringFunction scoringFunction) {
+    return run(
+        candlesBySymbol,
+        fundingBySymbol,
+        spotCandlesBySymbol,
+        folds,
+        embargoBars,
+        minTrades,
+        interval,
+        cfg,
+        allocatedCapital,
+        noTradeBand,
+        candidates,
+        scoringFunction,
+        RiskParameters.defaults());
+  }
+
+  /**
+   * Same as the twelve-argument {@link #run} overload, plus an explicit {@link RiskParameters}
+   * (PLAN-021 Task C) — the eleven-argument overload always used {@link RiskParameters#defaults()}
+   * ({@code maxLeverage = 2.0}), which made a pre-registered non-default leverage (e.g. the 1× this
+   * plan's own PLAN-016 pre-registration freezes for {@code CarryRankingStrategy}, per PLAN-019
+   * Task A's SURVIVABLE verdict) impossible to express. Leverage is not cosmetic here: it is the
+   * carry margin divisor ({@link PortfolioBacktestHarness}'s two-leg {@code runTargets}), so it
+   * directly sets the liquidation rate. The effective {@code maxLeverage} is echoed into every
+   * result's {@code params} under the key {@code "maxLeverage"} (unless the caller already put an
+   * entry there), same convention as {@code noTradeBand}, so a pre-registered constant that shaped
+   * the run is auditable from the output alone.
+   *
+   * @param riskParameters risk parameters (including {@code maxLeverage}) used to build a fresh
+   *     {@link RiskManager} for every fold
+   */
+  public static List<PortfolioCalibrationResult> run(
+      Map<String, List<Candle>> candlesBySymbol,
+      Map<String, List<FundingEvent>> fundingBySymbol,
+      Map<String, List<Candle>> spotCandlesBySymbol,
+      int folds,
+      int embargoBars,
+      int minTrades,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      BigDecimal allocatedCapital,
+      BigDecimal noTradeBand,
+      List<PortfolioCandidate> candidates,
+      PortfolioScoringFunction scoringFunction,
+      RiskParameters riskParameters) {
     Objects.requireNonNull(candlesBySymbol, "candlesBySymbol");
     Objects.requireNonNull(fundingBySymbol, "fundingBySymbol");
     Objects.requireNonNull(spotCandlesBySymbol, "spotCandlesBySymbol");
@@ -114,6 +162,7 @@ public final class PortfolioCalibrationHarness {
     Objects.requireNonNull(noTradeBand, "noTradeBand");
     Objects.requireNonNull(candidates, "candidates");
     Objects.requireNonNull(scoringFunction, "scoringFunction");
+    Objects.requireNonNull(riskParameters, "riskParameters");
     if (minTrades < 0) {
       throw new IllegalArgumentException("minTrades must be >= 0, got: " + minTrades);
     }
@@ -132,7 +181,8 @@ public final class PortfolioCalibrationHarness {
               interval,
               cfg,
               allocatedCapital,
-              noTradeBand);
+              noTradeBand,
+              riskParameters);
       if (result.cvTradeCountTotal() >= minTrades) {
         survivors.add(result);
       }
@@ -154,7 +204,11 @@ public final class PortfolioCalibrationHarness {
       CandleInterval interval,
       BacktestConfig cfg,
       BigDecimal allocatedCapital,
-      BigDecimal noTradeBand) {
+      BigDecimal defaultNoTradeBand,
+      RiskParameters riskParameters) {
+
+    BigDecimal noTradeBand =
+        candidate.noTradeBand() != null ? candidate.noTradeBand() : defaultNoTradeBand;
 
     double[] sharpes = new double[windows.size()];
     BigDecimal[] returns = new BigDecimal[windows.size()];
@@ -200,8 +254,7 @@ public final class PortfolioCalibrationHarness {
       }
 
       MutableClock clock = new MutableClock(Instant.EPOCH, ZoneOffset.UTC);
-      RiskManagerPort rm =
-          new BacktestClockSync(new RiskManager(RiskParameters.defaults(), clock), clock);
+      RiskManagerPort rm = new BacktestClockSync(new RiskManager(riskParameters, clock), clock);
 
       BacktestResult r =
           PortfolioBacktestHarness.runTargets(
@@ -257,8 +310,16 @@ public final class PortfolioCalibrationHarness {
                 .divide(pooledDeployedCapitalDays, IndicatorMath.MC)
                 .multiply(DAYS_PER_YEAR, IndicatorMath.MC);
 
+    Map<String, Object> paramsSnapshot = candidate.paramsSnapshot();
+    if (!paramsSnapshot.containsKey("noTradeBand") || !paramsSnapshot.containsKey("maxLeverage")) {
+      Map<String, Object> enriched = new LinkedHashMap<>(paramsSnapshot);
+      enriched.putIfAbsent("noTradeBand", noTradeBand);
+      enriched.putIfAbsent("maxLeverage", riskParameters.maxLeverage());
+      paramsSnapshot = Map.copyOf(enriched);
+    }
+
     return new PortfolioCalibrationResult(
-        candidate.paramsSnapshot(),
+        paramsSnapshot,
         medianSharpe,
         medianReturn,
         worstDd,
