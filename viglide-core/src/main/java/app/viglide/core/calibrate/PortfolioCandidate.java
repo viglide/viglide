@@ -27,6 +27,11 @@ public record PortfolioCandidate(
     Objects.requireNonNull(paramsSnapshot, "paramsSnapshot");
     paramsSnapshot = Map.copyOf(new LinkedHashMap<>(paramsSnapshot));
     if (configOverride == null) configOverride = UnaryOperator.identity();
+    // Same bound PortfolioBacktestHarness#runTargets enforces, checked here so a malformed grid
+    // fails when the candidate is built rather than part-way through the first fold that runs it.
+    if (noTradeBand != null && noTradeBand.signum() < 0) {
+      throw new IllegalArgumentException("noTradeBand must be >= 0, got: " + noTradeBand);
+    }
   }
 
   /** Backward-compatible constructor defaulting {@code configOverride} to identity, no override. */

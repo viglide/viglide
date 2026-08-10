@@ -1,6 +1,7 @@
 package app.viglide.research.calibrate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import app.viglide.core.backtest.BacktestConfig;
 import app.viglide.core.backtest.FeeModel;
@@ -321,6 +322,57 @@ class PortfolioCalibrationHarnessTest {
     // neither candidate's own paramsSnapshot mentioned it.
     assertThat(tight.params().get("noTradeBand")).isEqualTo(new BigDecimal("0.05"));
     assertThat(wide.params().get("noTradeBand")).isEqualTo(new BigDecimal("0.30"));
+  }
+
+  @Test
+  void run_reservedParamKeys_reportEffectiveValues_notCallerSuppliedOnes() {
+    // The reserved keys must describe the run, not the caller's intent. A grid builder that writes
+    // the band into paramsSnapshot but forgets PortfolioCandidate#noTradeBand is the realistic
+    // mistake here: honouring its label would emit a row claiming 0.05 for a run that used the
+    // harness-wide 0.5, re-creating PLAN-021 Task B's silent collapse in the audit trail itself.
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    PortfolioCandidate mislabelled =
+        new PortfolioCandidate(
+            new OscillatingWeightStrategy(symbol),
+            Map.of("variant", "mislabelled", "noTradeBand", "0.05", "maxLeverage", "99"));
+
+    List<PortfolioCalibrationResult> results =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            Map.of(symbol, fundingEvery(80, 2)),
+            Map.of(symbol, alternatingCandles(80)),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            smallCapCfg(),
+            new BigDecimal("10000"),
+            new BigDecimal("0.5"),
+            List.of(mislabelled),
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    assertThat(results).hasSize(1);
+    Map<String, Object> params = results.get(0).params();
+    assertThat(params.get("noTradeBand")).isEqualTo(new BigDecimal("0.5"));
+    assertThat(params.get("maxLeverage")).isEqualTo(RiskParameters.defaults().maxLeverage());
+    // Non-reserved caller keys are untouched.
+    assertThat(params.get("variant")).isEqualTo("mislabelled");
+  }
+
+  @Test
+  void portfolioCandidate_rejectsNegativeNoTradeBand() {
+    // runTargets enforces this bound too, but only once a fold actually runs -- by which point a
+    // malformed grid has already been accepted and partially evaluated.
+    assertThatThrownBy(
+            () ->
+                new PortfolioCandidate(
+                    new ConstantCarryStrategy("AAA"),
+                    Map.of("variant", "bad"),
+                    UnaryOperator.identity(),
+                    new BigDecimal("-0.01")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("noTradeBand");
   }
 
   @Test

@@ -86,10 +86,11 @@ public final class PortfolioCalibrationHarness {
    * @param noTradeBand the harness-wide default notional no-trade band. A real parameter in this
    *     task's own search surface (PLAN-019 Task D) — to vary it per candidate (e.g. across a
    *     search grid), set {@link PortfolioCandidate#noTradeBand()} explicitly on that candidate; a
-   *     non-null candidate value takes precedence over this default and is echoed into the
-   *     candidate's {@code paramsSnapshot} under the key {@code "noTradeBand"} (unless the caller
-   *     already put an entry there), so the winning row in {@link PortfolioCalibrationResult} is
-   *     self-describing (PLAN-021 Task B)
+   *     non-null candidate value takes precedence over this default. Whichever value applied is
+   *     echoed into every result's {@code params} under the reserved key {@code "noTradeBand"},
+   *     overwriting any same-named entry in the candidate's own {@code paramsSnapshot}, so the
+   *     winning row in {@link PortfolioCalibrationResult} is self-describing and cannot disagree
+   *     with the run it describes (PLAN-021 Task B)
    * @param candidates every parameter set to evaluate, already built
    * @param scoringFunction ranks the ranked-descending output; {@link
    *     PortfolioScoringFunction#CARRY_YIELD} is the recommended default, mirroring {@link
@@ -126,15 +127,15 @@ public final class PortfolioCalibrationHarness {
 
   /**
    * Same as the twelve-argument {@link #run} overload, plus an explicit {@link RiskParameters}
-   * (PLAN-021 Task C) — the eleven-argument overload always used {@link RiskParameters#defaults()}
-   * ({@code maxLeverage = 2.0}), which made a pre-registered non-default leverage (e.g. the 1× this
-   * plan's own PLAN-016 pre-registration freezes for {@code CarryRankingStrategy}, per PLAN-019
-   * Task A's SURVIVABLE verdict) impossible to express. Leverage is not cosmetic here: it is the
-   * carry margin divisor ({@link PortfolioBacktestHarness}'s two-leg {@code runTargets}), so it
-   * directly sets the liquidation rate. The effective {@code maxLeverage} is echoed into every
-   * result's {@code params} under the key {@code "maxLeverage"} (unless the caller already put an
-   * entry there), same convention as {@code noTradeBand}, so a pre-registered constant that shaped
-   * the run is auditable from the output alone.
+   * (PLAN-021 Task C) — that overload always used {@link RiskParameters#defaults()} ({@code
+   * maxLeverage = 2.0}), which made a pre-registered non-default leverage (e.g. the 1× this plan's
+   * own PLAN-016 pre-registration freezes for {@code CarryRankingStrategy}, per PLAN-019 Task A's
+   * SURVIVABLE verdict) impossible to express. Leverage is not cosmetic here: it is the carry
+   * margin divisor ({@link PortfolioBacktestHarness}'s two-leg {@code runTargets}), so it directly
+   * sets the liquidation rate. The effective {@code maxLeverage} is echoed into every result's
+   * {@code params} under the reserved key {@code "maxLeverage"}, overwriting any same-named caller
+   * entry — same convention as {@code noTradeBand} — so a pre-registered constant that shaped the
+   * run is auditable from the output alone.
    *
    * @param riskParameters risk parameters (including {@code maxLeverage}) used to build a fresh
    *     {@link RiskManager} for every fold
@@ -310,13 +311,18 @@ public final class PortfolioCalibrationHarness {
                 .divide(pooledDeployedCapitalDays, IndicatorMath.MC)
                 .multiply(DAYS_PER_YEAR, IndicatorMath.MC);
 
-    Map<String, Object> paramsSnapshot = candidate.paramsSnapshot();
-    if (!paramsSnapshot.containsKey("noTradeBand") || !paramsSnapshot.containsKey("maxLeverage")) {
-      Map<String, Object> enriched = new LinkedHashMap<>(paramsSnapshot);
-      enriched.putIfAbsent("noTradeBand", noTradeBand);
-      enriched.putIfAbsent("maxLeverage", riskParameters.maxLeverage());
-      paramsSnapshot = Map.copyOf(enriched);
-    }
+    // "noTradeBand" and "maxLeverage" are reserved keys that always report the value that actually
+    // shaped this run, overwriting any same-named entry the caller put in its own snapshot. Echoing
+    // only when absent would let the two disagree silently: a grid builder that writes the band
+    // into
+    // paramsSnapshot but forgets PortfolioCandidate#noTradeBand would emit rows labelled with five
+    // distinct bands that every one of them ran at the harness-wide default -- exactly the silent
+    // collapse PLAN-021 Task B exists to prevent. Overwriting makes that mistake self-evident
+    // instead: the rows come out visibly identical.
+    Map<String, Object> enriched = new LinkedHashMap<>(candidate.paramsSnapshot());
+    enriched.put("noTradeBand", noTradeBand);
+    enriched.put("maxLeverage", riskParameters.maxLeverage());
+    Map<String, Object> paramsSnapshot = Map.copyOf(enriched);
 
     return new PortfolioCalibrationResult(
         paramsSnapshot,
