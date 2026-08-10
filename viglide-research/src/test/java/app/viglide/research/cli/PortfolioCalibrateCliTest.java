@@ -1,6 +1,7 @@
 package app.viglide.research.cli;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import app.viglide.core.params.JsonReader;
 import java.io.IOException;
@@ -59,6 +60,48 @@ class PortfolioCalibrateCliTest {
 
     assertThat(Files.readString(outDir.resolve("top.csv"))).contains("variant");
     assertThat(Files.exists(outDir.resolve("progress.log"))).isTrue();
+  }
+
+  /**
+   * The placeholder manifest is only ever read when a run dies before finishing, so its trials /
+   * candidatesRequested pair is exactly what has to be right — under this CLI's own "trials &lt;
+   * candidatesRequested means the sweep was cut short" rule, writing those two the wrong way round
+   * would leave an aborted run's manifest claiming a completed sweep.
+   */
+  @Test
+  void run_abortedMidSweep_leavesManifestReadingAsIncomplete_neverAsCompleted(@TempDir Path tmp)
+      throws IOException {
+    Path datasetsDir = tmp.resolve("data");
+    Files.createDirectories(datasetsDir);
+    Files.writeString(datasetsDir.resolve("AAA_1h_2024.csv"), alternatingCandlesCsv(60));
+    Files.writeString(datasetsDir.resolve("AAA_funding_2024.csv"), fundingCsv(60));
+    // Spot covers only the first 15 bars, so the later fold's own slice comes up empty and "AAA" is
+    // (correctly, PLAN-022 Task C) not carry-capable there -- which the fixture strategy, targeting
+    // DELTA_NEUTRAL_CARRY unconditionally, then trips over. Any mid-sweep abort would do; this is
+    // simply the one this PR newly makes reachable.
+    Files.writeString(datasetsDir.resolve("AAA_spot_1h_2024.csv"), alternatingCandlesCsv(15));
+
+    Path outDir = tmp.resolve("out");
+    String[] argv = {
+      "--pairs=AAA",
+      "--strategy=fixture-carry-cli",
+      "--label=2024",
+      "--datasets-dir=" + datasetsDir,
+      "--folds=2",
+      "--embargo-bars=0",
+      "--min-trades=0",
+      "--warmup-bars=5",
+      "--out=" + outDir
+    };
+
+    assertThatThrownBy(() -> PortfolioCalibrateCli.run(argv))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    @SuppressWarnings("unchecked")
+    Map<String, Object> manifest =
+        (Map<String, Object>) JsonReader.parse(Files.readString(outDir.resolve("manifest.json")));
+    assertThat(((Number) manifest.get("trials")).intValue()).isZero();
+    assertThat(((Number) manifest.get("candidatesRequested")).intValue()).isEqualTo(2);
   }
 
   @Test

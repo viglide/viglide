@@ -498,6 +498,36 @@ class PortfolioCalibrationHarnessTest {
   }
 
   @Test
+  void run_checkpointEveryBelowOne_rejectedUpFront_notAsArithmeticExceptionMidSweep() {
+    String symbol = "AAA";
+
+    // The bare `evaluated % checkpointEvery` would instead throw ArithmeticException from inside
+    // the candidate loop -- i.e. only after the first candidate had already been evaluated, which
+    // against the real corpus is hours in, discarding the whole sweep.
+    assertThatThrownBy(
+            () ->
+                PortfolioCalibrationHarness.run(
+                    Map.of(symbol, alternatingCandles(80)),
+                    Map.of(symbol, fundingEvery(80, 2)),
+                    Map.of(symbol, alternatingCandles(80)),
+                    4,
+                    0,
+                    0,
+                    CandleInterval.ONE_HOUR,
+                    smallCapCfg(),
+                    new BigDecimal("10000"),
+                    new BigDecimal("0.05"),
+                    List.of(candidate(symbol, 2, "c0")),
+                    PortfolioScoringFunction.CARRY_YIELD,
+                    RiskParameters.defaults(),
+                    null,
+                    null,
+                    0))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("checkpointEvery");
+  }
+
+  @Test
   void run_progressConsumer_emitsStartAndFinishLines() {
     String symbol = "AAA";
     List<Candle> perp = alternatingCandles(80);

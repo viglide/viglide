@@ -270,6 +270,13 @@ public final class PortfolioCalibrationHarness {
     if (minTrades < 0) {
       throw new IllegalArgumentException("minTrades must be >= 0, got: " + minTrades);
     }
+    // Checked here rather than left to `evaluated % checkpointEvery`: a zero would otherwise
+    // surface as a bare ArithmeticException thrown from inside the candidate loop -- i.e. hours
+    // into an overnight sweep, discarding it -- which is the precise failure class this task
+    // exists to remove.
+    if (checkpointEvery < 1) {
+      throw new IllegalArgumentException("checkpointEvery must be >= 1, got: " + checkpointEvery);
+    }
 
     List<PortfolioFoldSplitter.PortfolioFoldWindow> windows =
         PortfolioFoldSplitter.splitPurged(candlesBySymbol, folds, cfg.warmupBars(), embargoBars);
@@ -322,11 +329,13 @@ public final class PortfolioCalibrationHarness {
   /**
    * Sorts {@code results} by {@code scoringFunction} descending, ties broken by the same stable
    * params-key convention as {@link CalibrationHarness}/{@link PanelCalibrationHarness} (NFR-7).
-   * Package-visible so a caller merging a truncated sweep's survivors with a resumed remainder's
-   * (PLAN-022 Task A) can re-rank the combined list exactly as {@link #run} itself would have,
-   * without duplicating the tie-break logic.
+   * Public because it is the second half of this harness's resume contract, not an internal detail:
+   * a caller that merges a truncated sweep's survivors with a resumed remainder's (PLAN-022 Task A)
+   * must re-rank the combined list exactly as {@link #run} itself would have, and the only way to
+   * do that without duplicating the tie-break is to call this. Package-private would have confined
+   * the documented resume path to this package's own tests.
    */
-  static List<PortfolioCalibrationResult> rank(
+  public static List<PortfolioCalibrationResult> rank(
       List<PortfolioCalibrationResult> results, PortfolioScoringFunction scoringFunction) {
     List<PortfolioCalibrationResult> ranked = new ArrayList<>(results);
     ranked.sort(

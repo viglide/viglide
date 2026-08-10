@@ -206,9 +206,13 @@ public final class PortfolioCalibrateCli {
 
     // Written now (trials=0 placeholder), same convention as CalibrateCli -- a run killed
     // mid-flight still leaves behind which dataset/args were attempted, overwritten below once the
-    // run actually finishes.
+    // run actually finishes. The placeholder deliberately reports trials=0 against the real
+    // candidatesRequested: that pair is what makes an aborted run self-evidently incomplete under
+    // the "trials < candidatesRequested" rule below, so getting the two the wrong way round would
+    // leave an abort looking like a finished sweep -- the exact silence PLAN-022 Task A exists to
+    // remove.
     writeManifest(
-        outDir, args, strategyName, included, skipped, candidates.size(), seed, searchMode, 0);
+        outDir, args, strategyName, included, skipped, 0, seed, searchMode, candidates.size());
 
     try (var writer =
         Files.newBufferedWriter(
