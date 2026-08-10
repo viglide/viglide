@@ -50,8 +50,8 @@ import java.util.function.Consumer;
  * <p>Required: {@code --pairs}, {@code --strategy}, {@code --label}. Optional: {@code --interval},
  * {@code --datasets-dir}, {@code --starting-cash}, {@code --fee-mode}, {@code --fee-scale}, {@code
  * --warmup-bars}, {@code --search}, {@code --samples}, {@code --seed}, {@code --parallelism},
- * {@code --time-budget}, {@code --checkpoint-every}, {@code --top}, {@code --trial-registry},
- * {@code --out}.
+ * {@code --time-budget}, {@code --checkpoint-every}, {@code --top}, {@code --min-trades} (default
+ * 30, ADR-0016 condition 2's floor), {@code --trial-registry}, {@code --out}.
  *
  * <p>The strategy is resolved through {@link ParameterSpaceRegistry}, so this public CLI never
  * imports a private strategy's package; each {@link Candidate} already carries its own built
@@ -84,6 +84,17 @@ public final class PanelCalibrateCli {
     int parallelism = Args.intOpt(args, "parallelism", 0); // 0 => harness picks cores-1
     int checkpointEvery = Args.intOpt(args, "checkpoint-every", 25);
     int topK = Args.intOpt(args, "top", 20);
+    // ADR-0016 condition 2's floor. PanelCalibrationHarness is the only one of the three
+    // calibration harnesses with no trade-count filter of its own -- CalibrationHarness and
+    // PortfolioCalibrationHarness both take minTrades -- almost certainly because until PLAN-023
+    // Task A it had never been run and nobody saw what it ranks without one. Its objective is
+    // pooled return on DEPLOYED CAPITAL, so a candidate that trades once per pair and holds
+    // briefly divides a real profit by a near-zero denominator and tops the list on 16 trades.
+    // That is the exact pathology (review finding F4: fits validated on 1-2 trades) this harness
+    // was built to eliminate, reproduced one level up. Filtered here rather than in the harness so
+    // the harness's own contract is unchanged and the raw ranking stays inspectable via
+    // --min-trades=0.
+    int minTrades = Args.intOpt(args, "min-trades", 30);
     Duration timeBudget = parseDuration(args.get("time-budget"));
     BigDecimal startingCash = Args.bigDecOpt(args, "starting-cash", new BigDecimal("10000"));
     FeeModel fees = PortfolioCli.buildFees(args);
@@ -170,7 +181,9 @@ public final class PanelCalibrateCli {
         candidates.size(),
         null,
         0,
-        parallelism);
+        parallelism,
+        minTrades,
+        0);
 
     try (var writer =
         Files.newBufferedWriter(
@@ -187,7 +200,7 @@ public final class PanelCalibrateCli {
             }
           };
 
-      List<PanelCalibrationHarness.PanelResult> ranked =
+      List<PanelCalibrationHarness.PanelResult> allResults =
           PanelCalibrationHarness.run(
               candlesBySymbol,
               fundingBySymbol,
@@ -204,6 +217,23 @@ public final class PanelCalibrateCli {
               progress,
               checkpointEvery);
 
+      List<PanelCalibrationHarness.PanelResult> ranked =
+          allResults.stream().filter(r -> r.pooledTradeCount() >= minTrades).toList();
+      int filteredOut = allResults.size() - ranked.size();
+      if (ranked.isEmpty() && !allResults.isEmpty()) {
+        // Loud, not an empty top.csv the reader has to interpret: "every candidate was too thin to
+        // evaluate" is a finding about the strategy, not an absence of one.
+        System.out.printf(
+            "WARNING: all %d candidates fell below --min-trades=%d (best pooled trade count was %d)"
+                + " -- no candidate is evaluable under ADR-0016 condition 2%n",
+            allResults.size(),
+            minTrades,
+            allResults.stream()
+                .mapToInt(PanelCalibrationHarness.PanelResult::pooledTradeCount)
+                .max()
+                .orElse(0));
+      }
+
       Path trialRegistryPath = Paths.get(Args.opt(args, "trial-registry", "research-trials.jsonl"));
       String datasetFingerprint =
           TrialRegistry.panelFingerprint(included, interval.name(), datasetsBySymbol);
@@ -213,7 +243,7 @@ public final class PanelCalibrateCli {
               Instant.now(),
               strategyName,
               datasetFingerprint,
-              ranked.size(),
+              allResults.size(), // trials = candidates evaluated, never candidates that survived
               seed,
               "panel-pooled-yield"));
       int cumulativeTrials =
@@ -225,19 +255,25 @@ public final class PanelCalibrateCli {
           strategyName,
           included,
           skipped,
-          ranked.size(),
+          allResults.size(),
           seed,
           searchMode,
           candidates.size(),
           datasetFingerprint,
           cumulativeTrials,
-          parallelism);
+          parallelism,
+          minTrades,
+          ranked.size());
       writeTop(outDir, ranked, topK);
       System.out.printf(
-          "panel calibration: candidates=%d evaluated=%d top1_score=%s → %s%n"
+          "panel calibration: candidates=%d evaluated=%d survivors=%d (filtered %d below"
+              + " min-trades=%d) top1_score=%s → %s%n"
               + "trial registry: cumulative for this panel=%d (%s, fingerprint %s)%n",
           candidates.size(),
+          allResults.size(),
           ranked.size(),
+          filteredOut,
+          minTrades,
           ranked.isEmpty() ? "n/a" : String.format("%.5f", ranked.get(0).score()),
           outDir,
           cumulativeTrials,
@@ -259,7 +295,9 @@ public final class PanelCalibrateCli {
       int candidatesRequested,
       String datasetFingerprint,
       int cumulativeTrials,
-      int parallelism)
+      int parallelism,
+      int minTrades,
+      int survivors)
       throws IOException {
     Map<String, Object> m = new LinkedHashMap<>();
     m.put("startedAt", Instant.now().toString());
@@ -275,6 +313,8 @@ public final class PanelCalibrateCli {
     m.put("trials", trials);
     m.put("datasetFingerprint", datasetFingerprint);
     m.put("cumulativeTrialsForPanel", cumulativeTrials);
+    m.put("minTrades", minTrades);
+    m.put("survivors", survivors);
     m.put("args", new LinkedHashMap<>(args));
     Files.writeString(outDir.resolve("manifest.json"), JsonWriter.pretty(m));
   }
