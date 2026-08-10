@@ -42,6 +42,7 @@ class PanelCalibrateCliTest {
               "--seed=42",
               "--warmup-bars=20",
               "--parallelism=1",
+              "--min-trades=0",
               "--trial-registry=" + tmp.resolve("trials.jsonl"),
               "--out=" + outDir
             });
@@ -81,6 +82,7 @@ class PanelCalibrateCliTest {
       "--samples=2",
       "--warmup-bars=20",
       "--parallelism=1",
+      "--min-trades=0",
       "--trial-registry=" + registry,
       "--out=" + tmp.resolve("out")
     };
@@ -151,6 +153,49 @@ class PanelCalibrateCliTest {
                   "--out=" + tmp.resolve("out")
                 }))
         .isNotZero();
+  }
+
+  /**
+   * ADR-0016 condition 2's floor, applied here because {@code PanelCalibrationHarness} has none of
+   * its own — the only one of the three calibration harnesses without one. Its objective divides by
+   * deployed capital, so an unfiltered ranking is topped by whichever candidate barely traded:
+   * exactly review finding F4's "validated on 1–2 trades" pathology, reproduced by the harness
+   * built to eliminate it. Found by running the real corpus for the first time (PLAN-016 Stage 2).
+   */
+  @Test
+  void filtersCandidatesBelowTheTradeFloor_andSaysSoWhenNoneSurvive(@TempDir Path tmp)
+      throws IOException {
+    Path data = tmp.resolve("data");
+    Files.createDirectories(data);
+    for (String pair : List.of("AAA", "BBB")) {
+      Files.writeString(data.resolve(pair + "_1h_2024.csv"), klines(120));
+      Files.writeString(data.resolve(pair + "_funding_2024.csv"), funding(120));
+    }
+    Path outDir = tmp.resolve("out");
+
+    PanelCalibrateCli.run(
+        new String[] {
+          "--pairs=AAA,BBB",
+          "--strategy=emarsi",
+          "--label=2024",
+          "--datasets-dir=" + data,
+          "--search=random",
+          "--samples=3",
+          "--warmup-bars=20",
+          "--parallelism=1",
+          "--min-trades=100000", // unreachable on 120 bars
+          "--trial-registry=" + tmp.resolve("trials.jsonl"),
+          "--out=" + outDir
+        });
+
+    @SuppressWarnings("unchecked")
+    Map<String, Object> m =
+        (Map<String, Object>) JsonReader.parse(Files.readString(outDir.resolve("manifest.json")));
+    assertThat(((Number) m.get("survivors")).intValue()).isZero();
+    // trials must still record what was EVALUATED, not what survived -- DSR is deflated by search
+    // effort, and filtering the output does not un-spend the search.
+    assertThat(((Number) m.get("trials")).intValue()).isEqualTo(3);
+    assertThat(((Number) m.get("minTrades")).intValue()).isEqualTo(100000);
   }
 
   private static String klines(int bars) {
