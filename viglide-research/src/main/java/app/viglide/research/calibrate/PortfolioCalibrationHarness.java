@@ -19,6 +19,7 @@ import app.viglide.core.risk.RiskManager;
 import app.viglide.core.risk.RiskManagerPort;
 import app.viglide.core.risk.RiskParameters;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -27,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * The calibration loop {@code CarryRankingStrategy} (and any future {@link
@@ -50,10 +52,15 @@ import java.util.Objects;
  * <p><strong>Deliberately sequential, not pooled/parallel like {@link PanelCalibrationHarness} or
  * {@link CalibrationHarness}</strong> — a disclosed scope simplification, not an oversight: the
  * search surface Task D actually needs ({@code k}, {@code windowSize}, {@code minFundingEvents},
- * {@code noTradeBand}) is small enough for a sequential loop to be practical, and neither
- * parallelism nor a time budget nor progress checkpointing is part of this task's stated acceptance
- * criteria. Determinism (NFR-7) holds regardless — candidates are scored in input order and ranked
- * with a stable tie-break, exactly {@link PanelCalibrationHarness#run}'s own tie-break convention.
+ * {@code noTradeBand}) is small enough for a sequential loop to be practical, and parallelism was
+ * not part of that task's stated acceptance criteria (still isn't — PLAN-022 Task A added {@code
+ * timeBudget}/{@code checkpointEvery} for a single-shot overnight run's own sake, mirroring {@link
+ * PanelCalibrationHarness}'s contract, without adding worker pooling). Determinism (NFR-7) holds
+ * regardless — candidates are scored in input order and ranked with a stable tie-break, exactly
+ * {@link PanelCalibrationHarness#run}'s own tie-break convention; a run truncated by {@code
+ * timeBudget} after {@code n} candidates and resumed over the remainder ranks identically to the
+ * same candidate list evaluated straight through, once the two partial results are merged and
+ * re-ranked with {@link #rank}.
  *
  * <p><strong>Per-fold mechanics mirror {@link CalibrationHarness#evaluateAcrossFolds}
  * exactly,</strong> just cross-sectionally: each fold's {@code repackagedPrefixBySymbol() +
@@ -154,6 +161,102 @@ public final class PortfolioCalibrationHarness {
       List<PortfolioCandidate> candidates,
       PortfolioScoringFunction scoringFunction,
       RiskParameters riskParameters) {
+    return runInternal(
+            candlesBySymbol,
+            fundingBySymbol,
+            spotCandlesBySymbol,
+            folds,
+            embargoBars,
+            minTrades,
+            interval,
+            cfg,
+            allocatedCapital,
+            noTradeBand,
+            candidates,
+            scoringFunction,
+            riskParameters,
+            null,
+            null,
+            Integer.MAX_VALUE)
+        .survivors();
+  }
+
+  /**
+   * Same as the thirteen-argument {@link #run} overload, plus {@code timeBudget}/{@code
+   * progress}/{@code checkpointEvery} (PLAN-022 Task A) — makes an overnight sweep against this
+   * harness survivable the same way {@link PanelCalibrationHarness}'s own contract already is:
+   * candidates stop being evaluated once {@code timeBudget} elapses (a cutoff surfaced as {@link
+   * PortfolioCalibrationRun#trials()} being less than {@code candidates.size()}, never silently),
+   * and every {@code checkpointEvery} candidates a progress line (current elapsed time and best
+   * score so far) is emitted to {@code progress}. {@code timeBudget == null} never cuts the sweep
+   * short, and {@code progress == null} emits nothing — both match the thirteen-argument overload's
+   * behaviour exactly, so that overload's own determinism guarantees are unaffected.
+   *
+   * <p>Candidates are still evaluated strictly in input order with no parallelism (this harness's
+   * own disclosed scope, see class Javadoc), so a sweep interrupted after {@code n} candidates and
+   * resumed by calling this method again over {@code candidates.subList(n, candidates.size())}
+   * produces, once the two survivor lists are merged and passed through {@link #rank}, the
+   * byte-identical ranking of the same candidate list evaluated straight through (NFR-7).
+   *
+   * @param timeBudget wall-clock budget for the whole sweep, checked between candidates; {@code
+   *     null} for no limit
+   * @param progress receives one line at the start, one every {@code checkpointEvery} candidates,
+   *     and one at the end; {@code null} to disable
+   * @param checkpointEvery how often (in evaluated candidates) to emit a progress line
+   */
+  public static PortfolioCalibrationRun run(
+      Map<String, List<Candle>> candlesBySymbol,
+      Map<String, List<FundingEvent>> fundingBySymbol,
+      Map<String, List<Candle>> spotCandlesBySymbol,
+      int folds,
+      int embargoBars,
+      int minTrades,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      BigDecimal allocatedCapital,
+      BigDecimal noTradeBand,
+      List<PortfolioCandidate> candidates,
+      PortfolioScoringFunction scoringFunction,
+      RiskParameters riskParameters,
+      Duration timeBudget,
+      Consumer<String> progress,
+      int checkpointEvery) {
+    return runInternal(
+        candlesBySymbol,
+        fundingBySymbol,
+        spotCandlesBySymbol,
+        folds,
+        embargoBars,
+        minTrades,
+        interval,
+        cfg,
+        allocatedCapital,
+        noTradeBand,
+        candidates,
+        scoringFunction,
+        riskParameters,
+        timeBudget,
+        progress,
+        checkpointEvery);
+  }
+
+  private static PortfolioCalibrationRun runInternal(
+      Map<String, List<Candle>> candlesBySymbol,
+      Map<String, List<FundingEvent>> fundingBySymbol,
+      Map<String, List<Candle>> spotCandlesBySymbol,
+      int folds,
+      int embargoBars,
+      int minTrades,
+      CandleInterval interval,
+      BacktestConfig cfg,
+      BigDecimal allocatedCapital,
+      BigDecimal noTradeBand,
+      List<PortfolioCandidate> candidates,
+      PortfolioScoringFunction scoringFunction,
+      RiskParameters riskParameters,
+      Duration timeBudget,
+      Consumer<String> progress,
+      int checkpointEvery) {
     Objects.requireNonNull(candlesBySymbol, "candlesBySymbol");
     Objects.requireNonNull(fundingBySymbol, "fundingBySymbol");
     Objects.requireNonNull(spotCandlesBySymbol, "spotCandlesBySymbol");
@@ -171,8 +274,20 @@ public final class PortfolioCalibrationHarness {
     List<PortfolioFoldSplitter.PortfolioFoldWindow> windows =
         PortfolioFoldSplitter.splitPurged(candlesBySymbol, folds, cfg.warmupBars(), embargoBars);
 
+    Instant start = Instant.now();
+    if (progress != null) {
+      progress.accept(
+          String.format(
+              "[%s] portfolio calibration started candidates=%d checkpointEvery=%d timeBudget=%s",
+              Instant.now(), candidates.size(), checkpointEvery, timeBudget));
+    }
+
     List<PortfolioCalibrationResult> survivors = new ArrayList<>();
+    int evaluated = 0;
     for (PortfolioCandidate candidate : candidates) {
+      if (timeBudget != null && Duration.between(start, Instant.now()).compareTo(timeBudget) >= 0) {
+        break;
+      }
       PortfolioCalibrationResult result =
           evaluateAcrossFolds(
               candidate,
@@ -184,17 +299,64 @@ public final class PortfolioCalibrationHarness {
               allocatedCapital,
               noTradeBand,
               riskParameters);
+      evaluated++;
       if (result.cvTradeCountTotal() >= minTrades) {
         survivors.add(result);
       }
+      if (progress != null && evaluated % checkpointEvery == 0) {
+        progress.accept(progressLine(start, evaluated, survivors, scoringFunction));
+      }
     }
 
-    List<PortfolioCalibrationResult> ranked = new ArrayList<>(survivors);
+    if (progress != null) {
+      progress.accept(progressLine(start, evaluated, survivors, scoringFunction));
+      progress.accept(
+          String.format(
+              "[%s] portfolio calibration finished evaluated=%d elapsed=%ds",
+              Instant.now(), evaluated, Duration.between(start, Instant.now()).toSeconds()));
+    }
+
+    return new PortfolioCalibrationRun(rank(survivors, scoringFunction), evaluated);
+  }
+
+  /**
+   * Sorts {@code results} by {@code scoringFunction} descending, ties broken by the same stable
+   * params-key convention as {@link CalibrationHarness}/{@link PanelCalibrationHarness} (NFR-7).
+   * Package-visible so a caller merging a truncated sweep's survivors with a resumed remainder's
+   * (PLAN-022 Task A) can re-rank the combined list exactly as {@link #run} itself would have,
+   * without duplicating the tie-break logic.
+   */
+  static List<PortfolioCalibrationResult> rank(
+      List<PortfolioCalibrationResult> results, PortfolioScoringFunction scoringFunction) {
+    List<PortfolioCalibrationResult> ranked = new ArrayList<>(results);
     ranked.sort(
         Comparator.comparingDouble(scoringFunction::score)
             .reversed()
             .thenComparing(r -> stableParamsKey(r.params())));
     return List.copyOf(ranked);
+  }
+
+  private static String progressLine(
+      Instant start,
+      int evaluated,
+      List<PortfolioCalibrationResult> survivorsSoFar,
+      PortfolioScoringFunction scoringFunction) {
+    String bestStr = "n/a";
+    double bestScore = Double.NEGATIVE_INFINITY;
+    PortfolioCalibrationResult best = null;
+    for (PortfolioCalibrationResult r : survivorsSoFar) {
+      double score = scoringFunction.score(r);
+      if (best == null || score > bestScore) {
+        best = r;
+        bestScore = score;
+      }
+    }
+    if (best != null) {
+      bestStr = String.format("%.5f %s", bestScore, best.params());
+    }
+    long elapsedSec = Duration.between(start, Instant.now()).toSeconds();
+    return String.format(
+        "[%s] evaluated=%d elapsed=%ds best=%s", Instant.now(), evaluated, elapsedSec, bestStr);
   }
 
   private static PortfolioCalibrationResult evaluateAcrossFolds(
@@ -218,6 +380,13 @@ public final class PortfolioCalibrationHarness {
     double[] ulcerIndexes = new double[windows.size()];
     BigDecimal pooledNetPnl = BigDecimal.ZERO;
     BigDecimal pooledDeployedCapitalDays = BigDecimal.ZERO;
+    // PLAN-022 Task C (N1): a symbol declared carry-capable overall (a key in spotCandlesBySymbol)
+    // whose slice for THIS fold comes up empty (a data gap) must not be re-registered as
+    // carry-capable for the fold with zero actual spot bars -- see the loop below. Accumulated
+    // here,
+    // across every fold, so it survives into the returned result instead of vanishing the moment
+    // this method returns.
+    Map<String, Integer> carryEligibilityGapsBySymbol = new LinkedHashMap<>();
 
     BacktestConfig candidateCfg = candidate.configOverride().apply(cfg);
 
@@ -249,8 +418,19 @@ public final class PortfolioCalibrationHarness {
             e.getKey(),
             sliceFundingToRange(fundingBySymbol.getOrDefault(e.getKey(), List.of()), e.getValue()));
         if (spotCandlesBySymbol.containsKey(e.getKey())) {
-          combinedSpot.put(
-              e.getKey(), sliceCandlesToRange(spotCandlesBySymbol.get(e.getKey()), e.getValue()));
+          List<Candle> spotSlice =
+              sliceCandlesToRange(spotCandlesBySymbol.get(e.getKey()), e.getValue());
+          // PLAN-022 Task C (N1): an empty slice must NOT put the key in combinedSpot -- runTargets
+          // derives carry-capability from key presence alone (its own Javadoc: "declared by data,
+          // never inferred"), so putting an empty list here would register the symbol
+          // carry-capable for this fold with zero actual spot bars, silently dropping it from every
+          // bar via barsSkipped instead of leaving it single-leg-eligible or failing loud on a
+          // strategy that still targets it.
+          if (spotSlice.isEmpty()) {
+            carryEligibilityGapsBySymbol.merge(e.getKey(), 1, Integer::sum);
+          } else {
+            combinedSpot.put(e.getKey(), spotSlice);
+          }
         }
       }
 
@@ -332,7 +512,8 @@ public final class PortfolioCalibrationHarness {
         totalTrades,
         windows.size(),
         pooledReturnOnDeployedCapital,
-        medianUlcer);
+        medianUlcer,
+        carryEligibilityGapsBySymbol);
   }
 
   private static List<FundingEvent> sliceFundingToRange(

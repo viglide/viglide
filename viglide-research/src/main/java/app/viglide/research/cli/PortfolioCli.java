@@ -109,8 +109,10 @@ public final class PortfolioCli {
   private static final String DEFAULT_FUNDING_MODEL = "v1";
 
   // PLAN-011 Task F: on-disk filename tag per interval (matches scripts/research_matrix.py's
-  // INTERVAL_TAG and download_historical_data.py's _csv_name convention).
-  private static final Map<CandleInterval, String> INTERVAL_TAG =
+  // INTERVAL_TAG and download_historical_data.py's _csv_name convention). Package-visible (PLAN-022
+  // Task B) so PortfolioCalibrateCli's dataset-path construction stays byte-identical to this
+  // class's own, rather than maintaining a second copy that could silently drift.
+  static final Map<CandleInterval, String> INTERVAL_TAG =
       Map.of(
           CandleInterval.ONE_DAY, "1d",
           CandleInterval.FOUR_HOURS, "4h",
@@ -541,7 +543,9 @@ public final class PortfolioCli {
 
   // ── fee model (mirrors BacktestCli's PLAN-008 Task E flags) ────────────────────────────────────
 
-  private static FeeModel buildFees(Map<String, String> args) {
+  // Package-visible (PLAN-022 Task B): PortfolioCalibrateCli reuses this exact fee-mode/fee-scale
+  // vocabulary rather than inventing a second dialect for the same concept.
+  static FeeModel buildFees(Map<String, String> args) {
     String feeMode = Args.opt(args, "fee-mode", DEFAULT_FEE_MODE);
     BigDecimal feeScale = Args.bigDecOpt(args, "fee-scale", DEFAULT_FEE_SCALE);
     FeeModel base =
@@ -558,24 +562,30 @@ public final class PortfolioCli {
   // ── risk manager: always on (CLAUDE.md §11 — no ungated portfolio mode) ────────────────────────
 
   private static RiskManagerPort buildRiskManager(Map<String, String> args) {
-    RiskParameters rp =
-        new RiskParameters(
-            Args.bigDecOpt(args, "rm-max-position-pct", new BigDecimal("0.02")),
-            Args.bigDecOpt(args, "rm-max-drawdown-pct", new BigDecimal("0.15")),
-            Args.bigDecOpt(args, "rm-max-leverage", new BigDecimal("2.0")),
-            Args.bigDecOpt(args, "rm-max-daily-volume-pct", new BigDecimal("0.005")),
-            Args.bigDecOpt(args, "rm-max-portfolio-risk-pct", new BigDecimal("0.005")),
-            Args.doubleOpt(args, "rm-stop-loss-atr-mult", 2.0),
-            Args.doubleOpt(args, "rm-confidence-floor", 0.5),
-            Duration.ofMinutes(Args.longOpt(args, "rm-max-stale-input-age-minutes", 90)),
-            // PLAN-012 Task F: absolute-dollar limits are a live-phase-only knob, deliberately
-            // not exposed as CLI flags here -- research/backtest runs stay unaffected (disabled).
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty());
+    RiskParameters rp = riskParametersFromArgs(args);
     MutableClock clock = new MutableClock(Instant.EPOCH, ZoneOffset.UTC);
     RiskManager rm = new RiskManager(rp, clock);
     return new BacktestClockSync(rm, clock);
+  }
+
+  // Package-visible (PLAN-022 Task B): PortfolioCalibrateCli needs the bare RiskParameters (to
+  // build a fresh RiskManager per fold itself, same as PortfolioCalibrationHarness already does),
+  // not one already wrapped for a single continuous backtest run's own clock.
+  static RiskParameters riskParametersFromArgs(Map<String, String> args) {
+    return new RiskParameters(
+        Args.bigDecOpt(args, "rm-max-position-pct", new BigDecimal("0.02")),
+        Args.bigDecOpt(args, "rm-max-drawdown-pct", new BigDecimal("0.15")),
+        Args.bigDecOpt(args, "rm-max-leverage", new BigDecimal("2.0")),
+        Args.bigDecOpt(args, "rm-max-daily-volume-pct", new BigDecimal("0.005")),
+        Args.bigDecOpt(args, "rm-max-portfolio-risk-pct", new BigDecimal("0.005")),
+        Args.doubleOpt(args, "rm-stop-loss-atr-mult", 2.0),
+        Args.doubleOpt(args, "rm-confidence-floor", 0.5),
+        Duration.ofMinutes(Args.longOpt(args, "rm-max-stale-input-age-minutes", 90)),
+        // PLAN-012 Task F: absolute-dollar limits are a live-phase-only knob, deliberately
+        // not exposed as CLI flags here -- research/backtest runs stay unaffected (disabled).
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty());
   }
 }
