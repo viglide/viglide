@@ -124,6 +124,7 @@ class PanelCalibrateCliTest {
                       "--strategy=does-not-exist",
                       "--label=2024",
                       "--datasets-dir=" + data,
+                      "--trial-registry=" + tmp.resolve("trials.jsonl"),
                       "--out=" + outDir
                     }))
         .isInstanceOf(IllegalArgumentException.class);
@@ -150,6 +151,7 @@ class PanelCalibrateCliTest {
                   "--strategy=emarsi",
                   "--label=2024",
                   "--datasets-dir=" + data,
+                  "--trial-registry=" + tmp.resolve("trials.jsonl"),
                   "--out=" + tmp.resolve("out")
                 }))
         .isNotZero();

@@ -45,6 +45,7 @@ class PortfolioCalibrateCliTest {
               "--embargo-bars=0",
               "--min-trades=0",
               "--warmup-bars=5",
+              "--trial-registry=" + tmp.resolve("trials.jsonl"),
               "--out=" + outDir
             });
 
@@ -91,6 +92,7 @@ class PortfolioCalibrateCliTest {
       "--embargo-bars=0",
       "--min-trades=0",
       "--warmup-bars=5",
+      "--trial-registry=" + tmp.resolve("trials.jsonl"),
       "--out=" + outDir
     };
 
@@ -168,6 +170,7 @@ class PortfolioCalibrateCliTest {
               "--strategy=fixture-carry-cli",
               "--label=2024",
               "--datasets-dir=" + datasetsDir,
+              "--trial-registry=" + tmp.resolve("trials.jsonl"),
               "--out=" + tmp.resolve("out")
             });
 
