@@ -1,6 +1,7 @@
 package app.viglide.research.calibrate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import app.viglide.core.backtest.BacktestConfig;
 import app.viglide.core.backtest.FeeModel;
@@ -11,6 +12,7 @@ import app.viglide.core.domain.FundingEvent;
 import app.viglide.core.domain.PortfolioContext;
 import app.viglide.core.domain.PositionShape;
 import app.viglide.core.domain.TargetPosition;
+import app.viglide.core.risk.RiskParameters;
 import app.viglide.core.spi.PortfolioStrategy;
 import app.viglide.core.spi.StrategyMetadata;
 import java.math.BigDecimal;
@@ -18,6 +20,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 import org.junit.jupiter.api.Test;
 
 /** Synthetic-fixture end-to-end tests for {@link PortfolioCalibrationHarness} (PLAN-019 Task D). */
@@ -64,6 +67,49 @@ class PortfolioCalibrationHarnessTest {
     @Override
     public StrategyMetadata metadata() {
       return new StrategyMetadata("never-trades-test", "1.0", "test-only");
+    }
+  }
+
+  /**
+   * Constant carry direction, but the weight itself alternates 1.0 / 0.8 every bar -- the position
+   * never goes flat, so every alternation is a same-direction resize whose delta against {@code
+   * lastDesired} is entirely governed by {@code noTradeBand} (PLAN-021 Task B), unlike {@link
+   * TogglingWeightStrategy}'s open/flat/open pattern above.
+   */
+  private record OscillatingWeightStrategy(String symbol) implements PortfolioStrategy {
+    @Override
+    public List<TargetPosition> evaluate(PortfolioContext context) {
+      if (!context.bySymbol().containsKey(symbol)) {
+        return List.of();
+      }
+      long hour = context.asOf().getEpochSecond() / 3600L;
+      BigDecimal weight = hour % 2 == 0 ? BigDecimal.ONE : new BigDecimal("0.8");
+      return List.of(
+          new TargetPosition(
+              symbol, weight, PositionShape.DELTA_NEUTRAL_CARRY, List.of(), "oscillate"));
+    }
+
+    @Override
+    public StrategyMetadata metadata() {
+      return new StrategyMetadata("oscillating-weight-test", "1.0", "test-only");
+    }
+  }
+
+  /** Constant full-weight carry target -- used for PLAN-021 Task C's leverage/margin fixture. */
+  private record ConstantCarryStrategy(String symbol) implements PortfolioStrategy {
+    @Override
+    public List<TargetPosition> evaluate(PortfolioContext context) {
+      if (!context.bySymbol().containsKey(symbol)) {
+        return List.of();
+      }
+      return List.of(
+          new TargetPosition(
+              symbol, BigDecimal.ONE, PositionShape.DELTA_NEUTRAL_CARRY, List.of(), "constant"));
+    }
+
+    @Override
+    public StrategyMetadata metadata() {
+      return new StrategyMetadata("constant-carry-leverage-test", "1.0", "test-only");
     }
   }
 
@@ -217,6 +263,226 @@ class PortfolioCalibrationHarnessTest {
     assertThat(PortfolioScoringFunction.CARRY_YIELD.score(r)).isEqualTo(expectedCarryYield);
     assertThat(PortfolioScoringFunction.MEDIAN_CV_SHARPE.score(byMedianSharpe.get(0)))
         .isEqualTo(byMedianSharpe.get(0).cvSharpeMedian());
+  }
+
+  @Test
+  void run_perCandidateNoTradeBand_producesDifferentTradeCounts() {
+    // PLAN-021 Task B (docs/tasks/PLAN-021-plan019-review-findings.md, Task B): before this field
+    // existed, PortfolioCandidate had no way to vary noTradeBand, so this is the one assertion the
+    // pre-fix API could not make -- two candidates, identical except for the band, diverging.
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    List<Candle> spot = alternatingCandles(80);
+    Map<String, List<FundingEvent>> funding = Map.of(symbol, fundingEvery(80, 2));
+    BacktestConfig cfg = smallCapCfg();
+    PortfolioStrategy strategy = new OscillatingWeightStrategy(symbol);
+
+    // Every bar, desired size swings by |1.0 - 0.8| * $10,000 = $2,000.
+    PortfolioCandidate tightBand =
+        new PortfolioCandidate(
+            strategy, Map.of("variant", "tight"), UnaryOperator.identity(), new BigDecimal("0.05"));
+    PortfolioCandidate wideBand =
+        new PortfolioCandidate(
+            strategy, Map.of("variant", "wide"), UnaryOperator.identity(), new BigDecimal("0.30"));
+
+    List<PortfolioCalibrationResult> results =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            funding,
+            Map.of(symbol, spot),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.5"), // harness-wide default -- both candidates override it
+            List.of(tightBand, wideBand),
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    assertThat(results).hasSize(2);
+    PortfolioCalibrationResult tight =
+        results.stream()
+            .filter(r -> "tight".equals(r.params().get("variant")))
+            .findFirst()
+            .orElseThrow();
+    PortfolioCalibrationResult wide =
+        results.stream()
+            .filter(r -> "wide".equals(r.params().get("variant")))
+            .findFirst()
+            .orElseThrow();
+
+    // 0.05 * $10,000 = $500 < $2,000 delta -> rebalances every alternation. 0.30 * $10,000 = $3,000
+    // > $2,000 delta -> the band swallows every alternation, leaving only the opening trade, which
+    // never closes voluntarily and is excluded as an END_OF_DATA artifact.
+    assertThat(tight.cvTradeCountTotal()).isGreaterThan(wide.cvTradeCountTotal());
+    assertThat(wide.cvTradeCountTotal()).isEqualTo(0);
+
+    // The winning row is self-describing: the effective band is echoed into params even though
+    // neither candidate's own paramsSnapshot mentioned it.
+    assertThat(tight.params().get("noTradeBand")).isEqualTo(new BigDecimal("0.05"));
+    assertThat(wide.params().get("noTradeBand")).isEqualTo(new BigDecimal("0.30"));
+  }
+
+  @Test
+  void run_reservedParamKeys_reportEffectiveValues_notCallerSuppliedOnes() {
+    // The reserved keys must describe the run, not the caller's intent. A grid builder that writes
+    // the band into paramsSnapshot but forgets PortfolioCandidate#noTradeBand is the realistic
+    // mistake here: honouring its label would emit a row claiming 0.05 for a run that used the
+    // harness-wide 0.5, re-creating PLAN-021 Task B's silent collapse in the audit trail itself.
+    String symbol = "AAA";
+    List<Candle> perp = alternatingCandles(80);
+    PortfolioCandidate mislabelled =
+        new PortfolioCandidate(
+            new OscillatingWeightStrategy(symbol),
+            Map.of("variant", "mislabelled", "noTradeBand", "0.05", "maxLeverage", "99"));
+
+    List<PortfolioCalibrationResult> results =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            Map.of(symbol, fundingEvery(80, 2)),
+            Map.of(symbol, alternatingCandles(80)),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            smallCapCfg(),
+            new BigDecimal("10000"),
+            new BigDecimal("0.5"),
+            List.of(mislabelled),
+            PortfolioScoringFunction.CARRY_YIELD);
+
+    assertThat(results).hasSize(1);
+    Map<String, Object> params = results.get(0).params();
+    assertThat(params.get("noTradeBand")).isEqualTo(new BigDecimal("0.5"));
+    assertThat(params.get("maxLeverage")).isEqualTo(RiskParameters.defaults().maxLeverage());
+    // Non-reserved caller keys are untouched.
+    assertThat(params.get("variant")).isEqualTo("mislabelled");
+  }
+
+  @Test
+  void portfolioCandidate_rejectsNegativeNoTradeBand() {
+    // runTargets enforces this bound too, but only once a fold actually runs -- by which point a
+    // malformed grid has already been accepted and partially evaluated.
+    assertThatThrownBy(
+            () ->
+                new PortfolioCandidate(
+                    new ConstantCarryStrategy("AAA"),
+                    Map.of("variant", "bad"),
+                    UnaryOperator.identity(),
+                    new BigDecimal("-0.01")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("noTradeBand");
+  }
+
+  @Test
+  void run_riskParametersOverload_differentLeverage_producesDifferentLiquidationOutcome() {
+    // PLAN-021 Task C (docs/tasks/PLAN-021-plan019-review-findings.md, Task C): leverage sets the
+    // carry margin divisor (PortfolioFundingArbHarnessV2's margin = q * price / leverage), so it
+    // directly controls whether this ramp fixture liquidates. Same candidate, same fixture, only
+    // RiskParameters#maxLeverage differs between the two calls.
+    String symbol = "AAA";
+    List<Candle> perp = rampToLiquidationCandles();
+    List<Candle> spot = rampToLiquidationCandles();
+    BacktestConfig cfg = smallCapCfg();
+    List<PortfolioCandidate> candidates =
+        List.of(
+            new PortfolioCandidate(new ConstantCarryStrategy(symbol), Map.of("variant", "ramp")));
+
+    RiskParameters twoX = RiskParameters.defaults(); // 2.0x -- this ramp liquidates under it
+    RiskParameters oneX = withLeverage(twoX, new BigDecimal("1.0")); // never liquidates
+
+    List<PortfolioCalibrationResult> at2x =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            Map.of(),
+            Map.of(symbol, spot),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates,
+            PortfolioScoringFunction.CARRY_YIELD,
+            twoX);
+    List<PortfolioCalibrationResult> at1x =
+        PortfolioCalibrationHarness.run(
+            Map.of(symbol, perp),
+            Map.of(),
+            Map.of(symbol, spot),
+            2,
+            0,
+            0,
+            CandleInterval.ONE_HOUR,
+            cfg,
+            new BigDecimal("10000"),
+            new BigDecimal("0.05"),
+            candidates,
+            PortfolioScoringFunction.CARRY_YIELD,
+            oneX);
+
+    assertThat(at2x).hasSize(1);
+    assertThat(at1x).hasSize(1);
+    // At 2x: q=2 (RM-approved $200 / $100 entry), margin=2*100/2=100, threshold=90 -> trips at
+    // close=150 (delta 50 * q=2 = 100 >= 90), the ramp's last bar -- one LIQUIDATION_GUARD trade.
+    // At 1x: margin=2*100/1=200, threshold=180 -> needs close>=190; the ramp only reaches 150, so
+    // the position opens once and is held (Task A's fix: no re-churn on price movement alone) until
+    // it is excluded as an END_OF_DATA artifact at each fold boundary -- zero counted trades.
+    assertThat(at2x.get(0).cvTradeCountTotal()).isGreaterThan(at1x.get(0).cvTradeCountTotal());
+    assertThat(at1x.get(0).cvTradeCountTotal()).isEqualTo(0);
+
+    // The effective leverage that shaped the run is auditable from the output alone.
+    assertThat(at2x.get(0).params().get("maxLeverage")).isEqualTo(new BigDecimal("2.0"));
+    assertThat(at1x.get(0).params().get("maxLeverage")).isEqualTo(new BigDecimal("1.0"));
+  }
+
+  private static RiskParameters withLeverage(RiskParameters base, BigDecimal maxLeverage) {
+    return new RiskParameters(
+        base.maxPositionPct(),
+        base.maxPortfolioDrawdownPct(),
+        maxLeverage,
+        base.maxDailyVolumePct(),
+        base.maxPortfolioRiskPct(),
+        base.stopLossAtrMult(),
+        base.confidenceFloor(),
+        base.maxStaleInputAge(),
+        base.maxTotalDeployedAbs(),
+        base.maxPositionAbs(),
+        base.maxDailyLossAbs(),
+        base.maxCampaignLossAbs());
+  }
+
+  /**
+   * 25 bars alternating 100/101 (real ATR, needed for the real RiskManager to approve the opening
+   * BUY at all -- a run of flat identical closes gives ATR(14)==0 and every open is refused as
+   * STOP_LOSS_UNDERIVABLE, delaying entry until the ramp itself and invalidating the margin math
+   * below), then a 5-bar ramp 110/120/130/140/150 landing exactly on fold 0's last bar (folds=2
+   * over 60 bars -> chunk size 30), then 30 more flat bars @ 150 filling fold 1 with nothing left
+   * for either leverage setting to react to.
+   */
+  private static List<Candle> rampToLiquidationCandles() {
+    List<Candle> out = new ArrayList<>(60);
+    for (int i = 0; i < 25; i++) {
+      out.add(rampCandle(i, i % 2 == 0 ? 100 : 101));
+    }
+    double[] ramp = {110, 120, 130, 140, 150};
+    for (int i = 0; i < ramp.length; i++) {
+      out.add(rampCandle(25 + i, ramp[i]));
+    }
+    for (int i = 0; i < 30; i++) {
+      out.add(rampCandle(30 + i, 150));
+    }
+    return out;
+  }
+
+  private static Candle rampCandle(int hourIndex, double price) {
+    BigDecimal p = BigDecimal.valueOf(price);
+    Instant t = T0.plusSeconds(3600L * hourIndex);
+    // Generous volume -- the RM's daily-volume cap must not interfere with this margin/leverage
+    // fixture, same convention as PortfolioBacktestHarnessRunTargetsCarryTest's own real-RM test.
+    return new Candle(t, p, p, p, p, new BigDecimal("1000000"));
   }
 
   private static BacktestConfig smallCapCfg() {

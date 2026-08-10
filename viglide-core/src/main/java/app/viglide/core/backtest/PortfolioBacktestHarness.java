@@ -941,6 +941,10 @@ public final class PortfolioBacktestHarness {
     Map<String, BigDecimal> lastNotional = new HashMap<>();
     // See the 7-argument runTargets's identical field for why this, not lastNotional, drives the
     // rebalance trigger (docs/notes/2026-08-07-plan019-runtargets-notradeband-fix.md).
+    // Invariant: every site that removes a symbol from `positions` or `carryPositions` must also
+    // remove it from lastDesired. A missed removal leaves a stale target that never changes again
+    // (lastDesired is only ever written on a successful open), permanently blocking re-entry for
+    // any strategy whose desired weight for that symbol is constant (PLAN-021 Task A).
     Map<String, BigDecimal> lastDesired = new HashMap<>();
     Map<String, Candle> lastCandle = new HashMap<>();
     Map<String, Candle> lastSpotCandle = new HashMap<>();
@@ -1125,6 +1129,12 @@ public final class PortfolioBacktestHarness {
               liquidations++;
               carryPositions.remove(symbol);
               lastNotional.remove(symbol);
+              // PLAN-021 Task A: this exit site was missing the lastDesired removal every other
+              // exit site performs (see the invariant on lastDesired's own declaration above). A
+              // missed removal here is not cosmetic: it permanently locks the liquidated symbol
+              // out of re-entry for an equal-weight strategy, since its desired target never
+              // changes and the trigger sees delta == 0 forever.
+              lastDesired.remove(symbol);
             }
           }
         }
