@@ -119,7 +119,15 @@ public final class CalibrateCli {
     BacktestConfig cfg =
         new BacktestConfig(
             baseCfg.startingCash(),
-            FeeModel.binanceDefault(),
+            // PLAN-016 Task C: was hardcoded to FeeModel.binanceDefault(), so --fee-mode and
+            // --fee-scale reached the *strategy* (its provider derives confidence from them) but
+            // never the harness, and the simulated cost of every fill stayed at base taker rates
+            // no matter what was asked for. A --fee-scale=2 sweep through this CLI therefore
+            // silently produced a base-fee result that differed just enough -- via the confidence
+            // change -- to look like it had done something. ADR-0016 condition 4 is a fee-
+            // sensitivity condition, so a calibration CLI that cannot vary fees cannot evaluate
+            // it. Now shares BacktestCli/PanelCalibrateCli/PortfolioCalibrateCli's one helper.
+            PortfolioCli.buildFees(args),
             Args.intOpt(args, "warmup-bars", baseCfg.warmupBars()),
             baseCfg.maxPositionPct(),
             baseCfg.stopLossPct(),
@@ -385,6 +393,12 @@ public final class CalibrateCli {
     // on the command line -- --objective defaults to carry-yield now, so a run relying on that
     // default must still be traceable without re-deriving it from CalibrateCli's own source.
     m.put("objective", Args.opt(args, "objective", "carry-yield"));
+    // Same reasoning as the resolved objective above, and the same reasoning PLAN-021's review
+    // applied to the noTradeBand echo: the fee model is now a real input to this CLI, so the
+    // manifest states the one that was used rather than leaving a reader to infer it from the
+    // presence or absence of a flag.
+    m.put("feeMode", Args.opt(args, "fee-mode", "taker"));
+    m.put("feeScale", Args.bigDecOpt(args, "fee-scale", java.math.BigDecimal.ONE));
     m.put("legacyMedianTradeCountFilter", Args.flag(args, "legacy-median-trade-filter"));
     Map<String, Object> argMap = new LinkedHashMap<>(args);
     m.put("args", argMap);

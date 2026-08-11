@@ -49,6 +49,11 @@ import java.util.Optional;
  *       acknowledgment that "economically hedged" is not the same thing as "margin-safe."
  *   <li><strong>Liquidation always costs taker fees</strong> ({@link FeeModel#taker()}), regardless
  *       of the configured {@code --fee-mode} — a forced close cannot be a resting limit order.
+ *   <li><strong>Both legs are charged one rate, and it is the derivatives rate.</strong> {@code
+ *       spotEntryFee} and {@code perpEntryFee} (and their exit counterparts) both apply {@code
+ *       cfg.fees().totalAdverseFactor(...)}, so a spot fill is costed at the perp's 5 bps rather
+ *       than a spot venue's own schedule. See {@link FeeModel} for the size of the resulting
+ *       understatement and why it is documented rather than silently corrected.
  * </ul>
  */
 public final class FundingArbHarnessV2 {
