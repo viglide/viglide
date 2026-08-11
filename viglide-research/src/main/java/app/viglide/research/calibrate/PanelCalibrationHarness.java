@@ -142,11 +142,18 @@ public final class PanelCalibrationHarness {
               Instant.now(), symbols.size(), workers, checkpointEvery, timeBudget));
     }
 
+    // PLAN-016 Task C (NFR-7): same fix, same reason as CalibrationHarness -- see the long comment
+    // there. Providers hand back Stream.generate(...) over one shared java.util.Random, which is
+    // documented unordered and drew a different parameter set on every run of the same seed once
+    // .parallel() raced several workers over it. PortfolioCalibrationHarness was never exposed:
+    // PLAN-019 Task D took a List<PortfolioCandidate> rather than a Stream, which is exactly the
+    // property that saved it.
+    List<Candidate> orderedCandidates = candidates.toList();
+
     try {
       pool.submit(
               () ->
-                  candidates
-                      .parallel()
+                  orderedCandidates.parallelStream()
                       .takeWhile(
                           c ->
                               timeBudget == null

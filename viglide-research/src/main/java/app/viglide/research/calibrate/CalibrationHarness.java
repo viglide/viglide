@@ -37,7 +37,16 @@ import java.util.stream.Stream;
  *
  * <p>Determinism: for a fixed candle list, fold split, and (for random search) seed, the output
  * ranking is byte-identical across runs (NFR-7). Parallelism does not affect determinism because
- * every evaluation is a pure function of (candidate, fold).
+ * every evaluation is a pure function of (candidate, fold) <em>and</em> because the candidate
+ * stream is materialised on the calling thread before any parallel consumption.
+ *
+ * <p><strong>That second clause was missing until PLAN-016 Task C, and so was the
+ * property.</strong> The original claim reasoned only about evaluation, which is indeed pure — but
+ * candidate <em>generation</em> was not. Providers return {@code Stream.generate(() ->
+ * tryBuild(sharedRandom))}, which is documented unordered, so {@code .parallel()} raced several
+ * workers over one {@link java.util.Random} and the same seed drew a different parameter set on
+ * every run (27 vs 28 survivors over byte-identical data). A Javadoc asserting a property nothing
+ * tested is how it survived from PLAN-002 to PLAN-016; {@code RandomSearchTest} now pins it.
  *
  * <p>Generic over strategy family — see {@link Candidate}. The caller is responsible for building
  * the stream of {@code Candidate}s (e.g. via {@link EmaRsiParameterSpace} or sibling spaces).
@@ -258,6 +267,20 @@ public final class CalibrationHarness {
         parallelism > 0 ? parallelism : Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
     ForkJoinPool pool = new ForkJoinPool(workers);
 
+    // PLAN-016 Task C (NFR-7): materialise the candidate stream on THIS thread before any parallel
+    // consumption. Every ParameterSpaceProvider's random(seed, samples) is
+    // `Stream.generate(() -> tryBuild(sharedRandom)).filter(nonNull).limit(samples)`, and
+    // Stream.generate is documented unordered: driving it through .parallel() let several workers
+    // race on one java.util.Random, so the five nextInt() calls inside a single candidate
+    // interleaved across threads and the search drew a DIFFERENT parameter set on every run of the
+    // same seed. Two runs of seed=42 over identical data returned 27 and 28 survivors. The seed was
+    // decorative -- for a pre-registered study whose reproducibility argument rests on it, that is
+    // the whole argument. Collecting first makes generation single-threaded and gives an ORDERED
+    // spliterator, so takeWhile's time budget also cuts a reproducible prefix instead of an
+    // arbitrary subset. Providers are fixed at source too; this is the backstop that protects any
+    // provider -- including private ones this module never sees -- from the same mistake.
+    List<Candidate> orderedCandidates = candidates.toList();
+
     AtomicLong evaluated = new AtomicLong();
     Instant start = Instant.now();
     List<CalibrationResult> results = new ArrayList<>();
@@ -272,8 +295,7 @@ public final class CalibrationHarness {
     try {
       pool.submit(
               () ->
-                  candidates
-                      .parallel()
+                  orderedCandidates.parallelStream()
                       .takeWhile(
                           c ->
                               timeBudget == null
