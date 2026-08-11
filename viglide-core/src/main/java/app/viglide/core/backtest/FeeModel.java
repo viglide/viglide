@@ -13,6 +13,23 @@ import java.util.Objects;
  * fill in this backtester is costed as a taker (market) order; {@code makerBps} is carried for
  * display/audit purposes and by {@link #maker()} (PLAN-008 Task E), which routes the maker rate
  * through the taker-costed field so the harness math picks it up without a separate code path.
+ *
+ * <p><strong>One rate, both venues — the spot leg is understated.</strong> These are Binance
+ * <em>USD-M futures</em> VIP-0 rates (0.02% maker / 0.05% taker). {@code FundingArbHarnessV2} and
+ * the portfolio harnesses apply the same {@link #totalAdverseFactor} to the spot leg of a two-leg
+ * delta-neutral trade, but Binance <em>spot</em> VIP-0 is 0.10% both sides — five times the taker
+ * rate assumed here. Per round trip, on the same 5 bps slippage assumption:
+ *
+ * <pre>
+ *   modelled:        4 legs x (5 taker + 5 slip)                    = 40 bps
+ *   venue-accurate:  2 x (10 spot + 5 slip) + 2 x (5 perp + 5 slip) = 50 bps
+ * </pre>
+ *
+ * <p>So costs are understated by roughly <strong>1.25x</strong> — comfortably inside the 2x fee
+ * sweep that ADR-0016 condition 4 already requires, which is why PLAN-016's conclusions do not move
+ * and this is recorded rather than corrected. It becomes load-bearing the moment the executing
+ * venue changes: a per-venue fee model is the honest fix, and it is not worth building against a
+ * venue decision that is currently open (see the lab's ADR-0017).
  */
 public record FeeModel(BigDecimal makerBps, BigDecimal takerBps, BigDecimal slippageBps) {
 
@@ -44,7 +61,10 @@ public record FeeModel(BigDecimal makerBps, BigDecimal takerBps, BigDecimal slip
     if (slippageBps.signum() < 0) throw new IllegalArgumentException("slippageBps must be >= 0");
   }
 
-  /** Binance default: 0.02% maker (display-only), 0.05% taker, 0.05% market-order slippage. */
+  /**
+   * Binance <strong>USD-M futures</strong> VIP-0 default: 0.02% maker (display-only), 0.05% taker,
+   * 0.05% market-order slippage. Not a spot schedule — see the class Javadoc's two-leg caveat.
+   */
   public static FeeModel binanceDefault() {
     return taker();
   }

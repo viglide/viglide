@@ -2,7 +2,6 @@ package app.viglide.research.cli;
 
 import app.viglide.core.backtest.BacktestConfig;
 import app.viglide.core.backtest.BacktestResult;
-import app.viglide.core.backtest.FeeModel;
 import app.viglide.core.data.CsvFundingReader;
 import app.viglide.core.data.CsvKlineReader;
 import app.viglide.core.domain.Candle;
@@ -38,9 +37,20 @@ import java.util.Random;
  * autocorrelation real funding data has, making the null unrealistically easy to beat and inflating
  * the reported percentile.
  *
- * <p>Invoke as: {@code ./gradlew :viglide-research:nullModel --args='--strategy=fundingarb
- * --dataset=<candles.csv> --funding-dataset=<funding.csv> --symbol=ETHUSDT --interval=ONE_HOUR
- * --null-model=200 --seed=42 --params=winners:winners.json'} — see {@code docs/runbook.md} §5.
+ * <p><strong>Runs the same harness the fit ran</strong> — {@code --funding-model=v1|v2}, defaulting
+ * to v2, exactly as {@code CalibrateCli} does. PLAN-016 Task C found this CLI hardwired to v1 (the
+ * income-only model: no spot leg, no basis P&amp;L, no liquidation guard) while every calibration
+ * it baselines runs v2, which would have made the permutation test a comparison against a model
+ * nobody fitted. {@code --fee-mode}/{@code --fee-scale} are honoured for the same reason: a 2x fee
+ * sweep that cannot be null-tested is not a sweep the gate can read.
+ *
+ * <p>Single-symbol by construction: it permutes one funding series and cannot express "a random
+ * basket of the same universe". For a cross-sectional strategy use {@code PortfolioNullModelCli} —
+ * two null hypotheses, two CLIs, rather than one bent over both.
+ *
+ * <p>Invoke as: {@code ./gradlew :viglide-strategies:nullModel --args='--strategy=fundingarb
+ * --dataset=<perp.csv> --funding-dataset=<funding.csv> --spot-dataset=<spot.csv> --symbol=ETHUSDT
+ * --interval=ONE_HOUR --null-model=200 --seed=42'} — see {@code docs/runbook/} §5.
  */
 public final class NullModelCli {
 
@@ -72,17 +82,43 @@ public final class NullModelCli {
       realFunding = s.toList();
     }
 
+    // PLAN-016 Task C: --funding-model=v1|v2 with the same meaning and the same default as
+    // CalibrateCli's. Before this the CLI was hardwired to FoldRunner.withFunding -- the v1
+    // income-only model with no spot leg, no basis P&L and no liquidation guard -- while every
+    // calibration it is supposed to be the null model *for* runs v2. A permutation test against a
+    // different harness than the fit answers a question nobody asked, so the flag is required here
+    // rather than defaulted quietly: v2 needs --spot-dataset, and failing loudly on a missing spot
+    // series is better than silently measuring the wrong model.
+    String fundingModel = Args.opt(args, "funding-model", "v2");
+    List<Candle> spotCandles = List.of();
+    if ("v2".equalsIgnoreCase(fundingModel)) {
+      try (var s = CsvKlineReader.stream(Paths.get(Args.require(args, "spot-dataset")))) {
+        spotCandles = s.toList();
+      }
+    } else if (!"v1".equalsIgnoreCase(fundingModel)) {
+      throw new IllegalArgumentException(
+          "unknown --funding-model='" + fundingModel + "'; expected v1|v2");
+    }
+    List<Candle> spot = spotCandles;
+    java.util.function.Function<List<FundingEvent>, FoldRunner> runnerFor =
+        events ->
+            "v2".equalsIgnoreCase(fundingModel)
+                ? FoldRunner.withFundingV2(events, spot)
+                : FoldRunner.withFunding(events);
+
     TradingStrategy strategy = StrategyRegistry.load().create(strategyName, args);
     BacktestConfig cfg =
         new BacktestConfig(
-            BigDecimal.valueOf(10_000),
-            FeeModel.binanceDefault(),
+            Args.bigDecOpt(args, "starting-cash", BigDecimal.valueOf(10_000)),
+            // Honours --fee-mode/--fee-scale like every other research CLI. Previously hardcoded to
+            // binanceDefault(), so a 2x fee sweep could not be null-tested at all.
+            PortfolioCli.buildFees(args),
             Args.intOpt(args, "warmup-bars", 100),
             BigDecimal.valueOf(0.02),
             BigDecimal.valueOf(0.02),
             BigDecimal.valueOf(0.04),
             8760);
-    FoldRunner runner = FoldRunner.withFunding(realFunding);
+    FoldRunner runner = runnerFor.apply(realFunding);
 
     Instant start = Instant.now();
     BacktestResult realResult = runner.run(strategy, candles, symbol, interval, cfg);
@@ -94,7 +130,7 @@ public final class NullModelCli {
       List<FundingEvent> permuted =
           circularPermute(realFunding, rng.nextInt(Math.max(1, realFunding.size())));
       BacktestResult nullResult =
-          FoldRunner.withFunding(permuted).run(strategy, candles, symbol, interval, cfg);
+          runnerFor.apply(permuted).run(strategy, candles, symbol, interval, cfg);
       nullStatistics[i] = nullResult.totalReturn().doubleValue();
     }
     long elapsedMs = java.time.Duration.between(start, Instant.now()).toMillis();

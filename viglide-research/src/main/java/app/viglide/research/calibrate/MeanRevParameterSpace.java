@@ -4,6 +4,7 @@ import app.viglide.core.backtest.FeeModel;
 import app.viglide.core.calibrate.Candidate;
 import app.viglide.core.calibrate.DoubleRange;
 import app.viglide.core.calibrate.IntRange;
+import app.viglide.core.calibrate.RandomSearch;
 import app.viglide.core.spi.ParameterSpaceProvider;
 import app.viglide.examples.meanrev.MeanRevParameters;
 import app.viglide.examples.meanrev.MeanReversionRsiBbStrategy;
@@ -109,8 +110,7 @@ public record MeanRevParameterSpace(
   }
 
   public Stream<Candidate> random(long seed, int samples) {
-    Random rng = new Random(seed);
-    return Stream.generate(() -> tryBuild(rng)).filter(java.util.Objects::nonNull).limit(samples);
+    return RandomSearch.draw(seed, samples, this::tryBuild);
   }
 
   private Candidate tryBuild(Random rng) {
