@@ -27,9 +27,14 @@ class SignalRegistryTest {
 
   @Test
   void namesAreSorted_neverServiceLoaderOrder() {
+    // Two fixtures, deliberately: the META-INF/services file lists "fixture-signal" first and
+    // "aa-fixture-signal" second, so a registry preserving ServiceLoader's discovery order would
+    // return them reversed. With one provider this assertion could not fail (NFR-7).
     SignalRegistry registry = SignalRegistry.load();
 
-    assertThat(List.copyOf(registry.names())).isSorted();
+    assertThat(List.copyOf(registry.names()))
+        .containsExactly("aa-fixture-signal", "fixture-signal")
+        .isSorted();
   }
 
   @Test
