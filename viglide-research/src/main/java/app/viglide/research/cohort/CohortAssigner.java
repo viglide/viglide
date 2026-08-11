@@ -30,7 +30,7 @@ public final class CohortAssigner {
 
   private CohortAssigner() {}
 
-  private record PairAdv(String pair, double adv) {}
+  private record PairAdv(String pair, double adv, int candlesInWindow) {}
 
   /**
    * @param candlesBySymbol every pair's own candle history, ascending by {@code openTime}, one
@@ -42,7 +42,11 @@ public final class CohortAssigner {
    *     are {@link Cohort#ALT}
    * @return one {@link CohortAssignment} per key of {@code candlesBySymbol}, ranked by ADV
    *     descending (rank 1 = highest); a pair with no candles in the lookback window gets ADV 0 and
-   *     ranks last, never excluded
+   *     ranks last, never excluded. When <em>every</em> pair is empty — the corpus's first window,
+   *     whose lookback predates the first bar — the ranking is decided entirely by the alphabetical
+   *     tie-break and carries no liquidity information. That case is not thrown on, because "no
+   *     history yet" is a corpus boundary rather than a caller error, but each assignment reports
+   *     {@link CohortAssignment#degenerate()} so a caller can refuse to score it.
    */
   public static List<CohortAssignment> assign(
       Map<String, List<Candle>> candlesBySymbol, Instant asOf, Duration lookback, int topKMajors) {
@@ -62,15 +66,17 @@ public final class CohortAssigner {
     List<PairAdv> ranked = new ArrayList<>();
     for (Map.Entry<String, List<Candle>> entry : new TreeMap<>(candlesBySymbol).entrySet()) {
       BigDecimal dollarVolume = BigDecimal.ZERO;
+      int candlesInWindow = 0;
       for (Candle c : entry.getValue()) {
         if (!c.openTime().isBefore(windowStart) && c.openTime().isBefore(asOf)) {
           dollarVolume =
               dollarVolume.add(c.close().multiply(c.volume(), IndicatorMath.MC), IndicatorMath.MC);
+          candlesInWindow++;
         }
       }
       double adv =
           dollarVolume.divide(BigDecimal.valueOf(lookbackDays), IndicatorMath.MC).doubleValue();
-      ranked.add(new PairAdv(entry.getKey(), adv));
+      ranked.add(new PairAdv(entry.getKey(), adv, candlesInWindow));
     }
     ranked.sort(
         Comparator.<PairAdv>comparingDouble(PairAdv::adv).reversed().thenComparing(PairAdv::pair));
@@ -79,7 +85,14 @@ public final class CohortAssigner {
     for (int i = 0; i < ranked.size(); i++) {
       int rank = i + 1;
       Cohort cohort = rank <= topKMajors ? Cohort.MAJOR : Cohort.ALT;
-      out.add(new CohortAssignment(ranked.get(i).pair(), cohort, asOf, ranked.get(i).adv(), rank));
+      out.add(
+          new CohortAssignment(
+              ranked.get(i).pair(),
+              cohort,
+              asOf,
+              ranked.get(i).adv(),
+              rank,
+              ranked.get(i).candlesInWindow()));
     }
     return List.copyOf(out);
   }

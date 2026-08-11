@@ -30,7 +30,9 @@ class K3HarnessTest {
           /* minYearsPerPairReplication= */ 2,
           /* reachabilityThresholds= */ new double[] {0.5, 0.6, 0.7, 0.8, 0.9},
           /* reachabilityFloorBps= */ 60.0,
-          /* minObservationsPerPair= */ 30);
+          /* minObservationsPerPair= */ 30,
+          /* s4MinTradeCountPerPair= */ 30,
+          /* s4MinQualifyingPairs= */ 4);
 
   @Test
   void wellCalibratedInformativeSignalWithReachableEdgePassesEveryGate() {
@@ -110,6 +112,10 @@ class K3HarnessTest {
 
     assertThat(result.s1Passes()).as("S1 replication on pure noise").isFalse();
     assertThat(result.s3Passes()).as("S3 pooled null on pure noise").isFalse();
+    assertThat(result.s2ExpectedCalibrationError())
+        .as("claims ~90% confidence at a ~50% hit rate, so ECE should be ~0.4")
+        .isGreaterThan(0.30);
+    assertThat(result.s2Passes()).as("S2 calibration on an overconfident signal").isFalse();
     assertThat(result.allPass()).isFalse();
   }
 
@@ -135,6 +141,41 @@ class K3HarnessTest {
 
     assertThat(result.s6Passes()).isFalse();
     assertThat(result.allPass()).isFalse();
+  }
+
+  @Test
+  void s4PairBreadthFloorIsNotInert_changingItChangesTheVerdict() {
+    // ADR-0027 D2: a frozen parameter must be proven to change behaviour before it is frozen. The
+    // otherwise-passing signal spans 4 pairs; asking S4 for 8 must flip it, or the knob is
+    // decorative and S4's breadth requirement is not really being enforced.
+    Map<String, Map<Integer, List<SignalObservation>>> byPairYear =
+        syntheticSignal(
+            List.of("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"),
+            List.of(2023, 2024),
+            300,
+            0.015,
+            1L);
+
+    assertThat(K3Harness.evaluate(byPairYear, DEFAULT_THRESHOLDS).s4Passes()).isTrue();
+    assertThat(K3Harness.evaluate(byPairYear, withS4QualifyingPairs(8)).s4Passes())
+        .as("only 4 pairs exist, so a breadth floor of 8 must fail S4")
+        .isFalse();
+  }
+
+  private static K3Harness.K3Thresholds withS4QualifyingPairs(int qualifyingPairs) {
+    K3Harness.K3Thresholds t = DEFAULT_THRESHOLDS;
+    return new K3Harness.K3Thresholds(
+        t.nullN(),
+        t.seed(),
+        t.reliabilityBins(),
+        t.maxCalibrationError(),
+        t.minPairsReplication(),
+        t.minYearsPerPairReplication(),
+        t.reachabilityThresholds(),
+        t.reachabilityFloorBps(),
+        t.minObservationsPerPair(),
+        t.s4MinTradeCountPerPair(),
+        qualifyingPairs);
   }
 
   private static final double[] CALIBRATION_BUCKETS = {0.55, 0.65, 0.75, 0.85, 0.95};

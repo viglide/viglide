@@ -125,6 +125,34 @@ class CohortAssignerTest {
     assertThat(newPair.adv()).isEqualTo(0.0);
     assertThat(newPair.advRank()).isEqualTo(2);
     assertThat(newPair.cohort()).isEqualTo(Cohort.ALT);
+    assertThat(newPair.degenerate()).as("no candles read for this pair").isTrue();
+    assertThat(result.stream().filter(a -> a.pair().equals("BTCUSDT")).findFirst().orElseThrow())
+        .satisfies(
+            btc -> {
+              assertThat(btc.candlesInWindow()).isEqualTo(30);
+              assertThat(btc.degenerate()).isFalse();
+            });
+  }
+
+  @Test
+  void firstWindowWithNoPriorHistoryIsReportedDegenerate_notSilentlyRankedAlphabetically() {
+    // The corpus's own 2021 boundary: a 30-day lookback ending at the first bar reads nothing, so
+    // every ADV is 0 and MAJOR falls out of the alphabetical tie-break. Task B's note records this
+    // as a corpus fact; the point of degenerate() is that a Task E consumer can detect it in code
+    // instead of having to remember the note.
+    Map<String, List<Candle>> byPair =
+        Map.of(
+            "BTCUSDT", dailyCandles(30, 1_000_000),
+            "ETHUSDT", dailyCandles(30, 500_000),
+            "ADAUSDT", dailyCandles(30, 1_000));
+
+    List<CohortAssignment> result = CohortAssigner.assign(byPair, DAY0, Duration.ofDays(30), 2);
+
+    assertThat(result).allMatch(CohortAssignment::degenerate);
+    assertThat(result).allMatch(a -> a.adv() == 0.0);
+    assertThat(result.stream().filter(a -> a.cohort() == Cohort.MAJOR).map(CohortAssignment::pair))
+        .as("alphabetical tie-break, not a liquidity ranking -- ADAUSDT is the least liquid pair")
+        .containsExactly("ADAUSDT", "BTCUSDT");
   }
 
   @Test

@@ -108,6 +108,7 @@ public final class CohortAssignCli {
         row.put("cohort", a.cohort().name());
         row.put("advRank", a.advRank());
         row.put("adv", a.adv());
+        row.put("candlesInWindow", a.candlesInWindow());
         rows.add(row);
       }
       windowsJson.put(e.getKey().toString(), rows);
@@ -123,7 +124,17 @@ public final class CohortAssignCli {
               .map(CohortAssignment::pair)
               .reduce((a, b) -> a + "," + b)
               .orElse("");
-      out.println("  " + e.getKey() + " MAJOR=[" + majors + "]");
+      boolean degenerate = e.getValue().stream().allMatch(CohortAssignment::degenerate);
+      out.println(
+          "  "
+              + e.getKey()
+              + " MAJOR=["
+              + majors
+              + "]"
+              + (degenerate
+                  ? "  [DEGENERATE: no candles in the lookback window -- this ranking is the"
+                      + " alphabetical tie-break, not a liquidity finding]"
+                  : ""));
     }
 
     String outArg = args.get("out");

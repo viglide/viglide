@@ -26,7 +26,19 @@ public final class K3Harness {
 
   private K3Harness() {}
 
-  /** Frozen thresholds a K3 run is pre-registered against, before any code touches real data. */
+  /**
+   * Frozen thresholds a K3 run is pre-registered against, before any code touches real data.
+   *
+   * <p>{@code minObservationsPerPair} (S6) and {@code s4MinTradeCountPerPair} are deliberately
+   * separate knobs measuring different samples: S6 floors each pair's <em>whole</em> observation
+   * count, while S4's floor applies to the high-probability subset a given threshold selects. One
+   * value cannot serve both — see {@link EconomicReachability}'s class Javadoc.
+   *
+   * @param s4MinTradeCountPerPair surviving observations a pair must contribute at a threshold for
+   *     that pair to count towards {@code s4MinQualifyingPairs}
+   * @param s4MinQualifyingPairs how many pairs must clear {@code s4MinTradeCountPerPair} at the
+   *     same threshold for S4 to treat that threshold as actionable
+   */
   public record K3Thresholds(
       int nullN,
       long seed,
@@ -36,7 +48,9 @@ public final class K3Harness {
       int minYearsPerPairReplication,
       double[] reachabilityThresholds,
       double reachabilityFloorBps,
-      int minObservationsPerPair) {}
+      int minObservationsPerPair,
+      int s4MinTradeCountPerPair,
+      int s4MinQualifyingPairs) {}
 
   public record K3Result(
       List<S1Replication.CellResult> s1Cells,
@@ -96,7 +110,10 @@ public final class K3Harness {
         EconomicReachability.sweep(all, thresholds.reachabilityThresholds());
     boolean s4 =
         EconomicReachability.reachable(
-            sweep, thresholds.reachabilityFloorBps(), thresholds.minObservationsPerPair());
+            sweep,
+            thresholds.reachabilityFloorBps(),
+            thresholds.s4MinTradeCountPerPair(),
+            thresholds.s4MinQualifyingPairs());
 
     Map<String, Integer> countByPair = new TreeMap<>();
     for (SignalObservation o : all) {
@@ -111,11 +128,23 @@ public final class K3Harness {
         cells, s1, curve, brier, ece, s2, pooledNull, s3, sweep, s4, Map.copyOf(countByPair), s6);
   }
 
+  /**
+   * Concatenates every cell in (pair, year) order. The ordering is not cosmetic: S3's pooled null
+   * circularly permutes this exact series, so a {@link java.util.HashMap} caller iterating in its
+   * own order would produce a different — still valid, but irreproducible — null distribution from
+   * the same data. Sorted here rather than required of the caller (NFR-7).
+   *
+   * <p>A circular shift over the concatenation does cross pair boundaries, which breaks the
+   * autocorrelation the permutation otherwise preserves at 1 point in every {@code cells} shifts.
+   * Accepted: S1 already null-tests each cell separately with its own within-cell permutation, and
+   * S3's job is the complementary pooled question.
+   */
   private static List<SignalObservation> flatten(
       Map<String, Map<Integer, List<SignalObservation>>> observationsByPairAndYear) {
     List<SignalObservation> out = new ArrayList<>();
-    for (Map<Integer, List<SignalObservation>> byYear : observationsByPairAndYear.values()) {
-      for (List<SignalObservation> cell : byYear.values()) {
+    for (Map<Integer, List<SignalObservation>> byYear :
+        new TreeMap<>(observationsByPairAndYear).values()) {
+      for (List<SignalObservation> cell : new TreeMap<>(byYear).values()) {
         out.addAll(cell);
       }
     }

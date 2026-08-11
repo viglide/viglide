@@ -7,6 +7,7 @@ import app.viglide.core.domain.Direction;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 /** Unit tests for {@link EconomicReachability}. */
@@ -44,30 +45,69 @@ class EconomicReachabilityTest {
   }
 
   @Test
-  void reachableWhenSomeThresholdClearsFloorWithEnoughTrades() {
-    List<EconomicReachability.ReachabilityPoint> points =
+  void sweepBreaksSurvivingObservationsDownByPair() {
+    List<SignalObservation> obs =
         List.of(
-            new EconomicReachability.ReachabilityPoint(0.5, 50, 30.0), // below floor
-            new EconomicReachability.ReachabilityPoint(0.8, 20, 80.0)); // clears floor
-    assertThat(EconomicReachability.reachable(points, 60.0, 10)).isTrue();
+            new SignalObservation("BTCUSDT", 2024, T0, 0.9, Direction.BUY, 0.01),
+            new SignalObservation("BTCUSDT", 2024, T0, 0.9, Direction.BUY, 0.01),
+            new SignalObservation("ETHUSDT", 2024, T0, 0.9, Direction.BUY, 0.01),
+            new SignalObservation("SOLUSDT", 2024, T0, 0.5, Direction.BUY, 0.01));
+
+    EconomicReachability.ReachabilityPoint point =
+        EconomicReachability.sweep(obs, new double[] {0.8}).get(0);
+
+    assertThat(point.tradeCountByPair())
+        .as("SOLUSDT fired only below the threshold, so it is absent rather than zero")
+        .containsExactlyInAnyOrderEntriesOf(Map.of("BTCUSDT", 2, "ETHUSDT", 1));
+    assertThat(point.pairsWithAtLeast(2)).isEqualTo(1);
   }
 
   @Test
-  void notReachableWhenFloorClearingThresholdHasTooFewTrades() {
-    // fundingarb's shape: a real edge that fails at every practical threshold, or here, one that
-    // only "clears" on too small a sample to trust (S6's per-pair floor doing its job).
+  void reachableWhenSomeThresholdClearsFloorAcrossEnoughPairs() {
     List<EconomicReachability.ReachabilityPoint> points =
-        List.of(new EconomicReachability.ReachabilityPoint(0.95, 3, 200.0));
-    assertThat(EconomicReachability.reachable(points, 60.0, 30)).isFalse();
+        List.of(
+            point(0.5, 30.0, Map.of("BTCUSDT", 25, "ETHUSDT", 25)), // below floor
+            point(0.8, 80.0, Map.of("BTCUSDT", 10, "ETHUSDT", 10))); // clears floor
+    assertThat(EconomicReachability.reachable(points, 60.0, 10, 2)).isTrue();
+  }
+
+  @Test
+  void notReachableWhenFloorClearingThresholdHasTooFewTradesPerPair() {
+    // A real edge that only "clears" on too small a sample to trust.
+    assertThat(
+            EconomicReachability.reachable(
+                List.of(point(0.95, 200.0, Map.of("BTCUSDT", 3))), 60.0, 30, 1))
+        .isFalse();
+  }
+
+  @Test
+  void notReachableWhenTheSurvivingSampleIsConcentratedInOnePair() {
+    // The defect this floor exists to close: 120 surviving observations, comfortably over any
+    // pooled count, but all of them on one pair. S6's per-pair floor cannot catch this -- it
+    // constrains the whole sample, not the high-probability subset a threshold selects -- so a
+    // signal that works on BTC alone would otherwise be reported as economically reachable.
+    List<EconomicReachability.ReachabilityPoint> points =
+        List.of(point(0.9, 400.0, Map.of("BTCUSDT", 120, "ETHUSDT", 2)));
+
+    assertThat(EconomicReachability.reachable(points, 60.0, 30, 4)).isFalse();
+    assertThat(EconomicReachability.reachable(points, 60.0, 30, 1))
+        .as("...and it does pass once the pre-registration only asks for one pair")
+        .isTrue();
   }
 
   @Test
   void notReachableWhenNoThresholdClearsTheFloor() {
     List<EconomicReachability.ReachabilityPoint> points =
         List.of(
-            new EconomicReachability.ReachabilityPoint(0.5, 100, 10.0),
-            new EconomicReachability.ReachabilityPoint(0.9, 50, 12.0));
-    assertThat(EconomicReachability.reachable(points, 60.0, 10)).isFalse();
+            point(0.5, 10.0, Map.of("BTCUSDT", 50, "ETHUSDT", 50)),
+            point(0.9, 12.0, Map.of("BTCUSDT", 25, "ETHUSDT", 25)));
+    assertThat(EconomicReachability.reachable(points, 60.0, 10, 2)).isFalse();
+  }
+
+  private static EconomicReachability.ReachabilityPoint point(
+      double threshold, double edgeBps, Map<String, Integer> byPair) {
+    int total = byPair.values().stream().mapToInt(Integer::intValue).sum();
+    return new EconomicReachability.ReachabilityPoint(threshold, total, edgeBps, byPair);
   }
 
   @Test

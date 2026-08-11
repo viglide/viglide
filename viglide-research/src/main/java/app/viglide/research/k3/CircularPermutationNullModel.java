@@ -55,6 +55,13 @@ public final class CircularPermutationNullModel {
    * statistic} on each permuted pairing, and reports where {@code statistic(x, y)} itself falls
    * within that null distribution.
    *
+   * <p>Offsets are drawn from {@code [0, y.length)}, so a draw of 0 yields the identity permutation
+   * and a null statistic exactly equal to the real one. That is inherited from {@code NullModelCli}
+   * rather than an oversight: the mid-rank rule scores such a draw 0.5 instead of 0, biasing the
+   * percentile up by at most {@code 0.5/n} per identity draw, which is negligible beside the value
+   * of K3's null being the same computation as K1′'s. <strong>Do not "fix" it here alone</strong> —
+   * doing so makes the two nulls silently incomparable.
+   *
    * @param statistic e.g. {@link RankIc#spearman}
    * @param n permutation count (ADR-0028 S3: 200)
    * @param seed makes the permutation offsets reproducible (NFR-7)
