@@ -67,6 +67,16 @@ tasks.register<JavaExec>("replay") {
     workingDir = rootProject.projectDir
 }
 
+tasks.register<JavaExec>("k3Evaluate") {
+    group = "viglide"
+    description = "Runs the K3 signal gate (ADR-0028 S1-S6) over a CSV of realized signal " +
+        "observations, one invocation per ex-ante cohort. Thresholds default to PLAN-024 §0.1's " +
+        "pre-registration; any override is named in the output. See K3EvaluateCli."
+    mainClass.set("app.viglide.research.cli.K3EvaluateCli")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = rootProject.projectDir
+}
+
 tasks.register<JavaExec>("nullModel") {
     group = "viglide"
     description = "Null-model (circular permutation) baseline: how often does this pipeline " +
