@@ -1,7 +1,7 @@
 [versions]
 javaToolchain = "25"
 springBoot    = "4.1.0"
-junit         = "5.11.4"
+junit         = "6.1.3"
 jqwik         = "1.10.1"
 assertj       = "3.26.3"
 archunit      = "1.4.2"
